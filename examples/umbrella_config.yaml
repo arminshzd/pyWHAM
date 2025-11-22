@@ -1,0 +1,11 @@
+centers: [-2, -1, 0, 1, 2]
+spring_constant: 10.0
+temperature: 1.0
+friction: 1.0
+time_step: 0.001
+steps: 200000
+stride: 100
+correlation_time: 10.0
+output_dir: examples/output
+metadata_name: umbrella_metadata.txt
+seed: 1234
