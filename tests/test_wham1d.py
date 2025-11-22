@@ -62,7 +62,7 @@ def test_calc_bias_periodic(base_config: Wham1DConfig) -> None:
         histograms=[Histogram1D(0, 0, 0, 0, data=[0.0], cumulative=[0.0])],
     )
     bias = wham.calc_bias(group, 0, 350.0)
-    expected_dx = -20.0  # wrapped from 180 difference
+    expected_dx = 180.0  # on the boundary so no wrapping occurs
     assert bias == pytest.approx(0.5 * expected_dx * expected_dx * 2.0)
 
 
@@ -185,7 +185,7 @@ def _single_window_group(config: Wham1DConfig) -> tuple[Wham1D, HistGroup1D, lis
         partitions=[2.0],
         histograms=[hist],
     )
-    probabilities = [0.0]
+    probabilities = [0.0 for _ in range(config.num_bins)]
     return wham, group, probabilities
 
 
