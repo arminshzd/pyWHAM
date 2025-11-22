@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
+import yaml
+
 from .structures import HistGroup2D, Histogram2D
 
 DEGREES = 360.0
@@ -489,96 +491,89 @@ class Wham2D:
                         f"{coor[0]}\t{coor[1]}\t{free_ene[i - self.config.num_bins_x][j - self.config.num_bins_y]}\t{final_prob[i - self.config.num_bins_x][j - self.config.num_bins_y]}\n"
                     )
 
-def parse_periodic(token: str) -> Tuple[bool, float]:
-    if not token.upper().startswith("P"):
-        raise ValueError(
-            "Command line:  wham-2d [units <real|metal|lj|...>] Px[=0|pi|val] hist_min_x hist_max_x num_bins_x Py[=0|pi|val] hist_min_y hist_max_y num_bins_y tol temperature numpad metadatafile freefile use_mask\n"
-        )
-    if len(token) == 2:
-        return True, DEGREES
-    suffix = token[3:]
-    if not suffix:
-        return True, DEGREES
-    if suffix[0] == "0":
+def parse_periodic(config: dict, suffix: str) -> Tuple[bool, float]:
+    periodic = bool(config.get(f"periodic_{suffix}", False))
+    if not periodic:
         return False, 0.0
-    if suffix[0].isalpha():
-        if suffix.upper().startswith("PI"):
-            return True, RADIANS
-        raise ValueError(
-            "Command line:  wham-2d [units <real|metal|lj|...>] Px[=0|pi|val] hist_min_x hist_max_x num_bins_x Py[=0|pi|val] hist_min_y hist_max_y num_bins_y tol temperature numpad metadatafile freefile use_mask\n"
-        )
-    return True, float(suffix)
+    period_value = config.get(f"period_{suffix}", DEGREES)
+    if isinstance(period_value, str) and period_value.lower() == "pi":
+        period = RADIANS
+    else:
+        period = float(period_value)
+    print(f"#Turning on periodicity for {suffix.upper()} with period = {period}")
+    return True, period
 
 
-def parse_units(args: List[str]) -> Tuple[float, List[str]]:
-    if args and args[0] == "units":
-        if len(args) < 2:
-            raise ValueError(
-                "Command line:  wham-2d [units <real|metal|lj|...>] Px[=0|pi|val] hist_min_x hist_max_x num_bins_x Py[=0|pi|val] hist_min_y hist_max_y num_bins_y tol temperature numpad metadatafile freefile use_mask\n"
-            )
-        units = args[1]
-        if units == "lj":
-            k_B = 1.0
-        elif units == "real":
-            k_B = 0.0019872067
-        elif units == "metal":
-            k_B = 8.617343e-5
-        elif units == "si":
-            k_B = 1.3806504e-23
-        elif units == "cgs":
-            k_B = 1.3806504e-16
-        elif units == "electron":
-            k_B = 3.16681534e-6
-        elif units == "micro":
-            k_B = 1.3806504e-8
-        elif units == "nano":
-            k_B = 0.013806504
-        elif units == "default":
-            k_B = k_B_DEFAULT
-        else:
-            raise ValueError(f"Unknown unit style: {units}\n")
-        print(f"# Setting value of k_B to = {k_B:.15g}")
-        return k_B, args[2:]
-    return k_B_DEFAULT, args
+def parse_units(units: str | None) -> float:
+    if units is None:
+        return k_B_DEFAULT
+    if units == "lj":
+        k_B = 1.0
+    elif units == "real":
+        k_B = 0.0019872067
+    elif units == "metal":
+        k_B = 8.617343e-5
+    elif units == "si":
+        k_B = 1.3806504e-23
+    elif units == "cgs":
+        k_B = 1.3806504e-16
+    elif units == "electron":
+        k_B = 3.16681534e-6
+    elif units == "micro":
+        k_B = 1.3806504e-8
+    elif units == "nano":
+        k_B = 0.013806504
+    elif units == "default":
+        k_B = k_B_DEFAULT
+    else:
+        raise ValueError(f"Unknown unit style: {units}\n")
+    print(f"# Setting value of k_B to = {k_B:.15g}")
+    return k_B
 
 
-def build_config(argv: List[str]) -> Wham2DConfig:
-    args = argv[:]
-    k_B, args = parse_units(args)
-    if len(args) != 14:
-        raise ValueError(
-            "Command line:  wham-2d [units <real|metal|lj|...>] Px[=0|pi|val] hist_min_x hist_max_x num_bins_x Py[=0|pi|val] hist_min_y hist_max_y num_bins_y tol temperature numpad metadatafile freefile use_mask\n"
-        )
-    periodic_x, period_x = parse_periodic(args[0])
-    hist_min_x = float(args[1])
-    hist_max_x = float(args[2])
-    num_bins_x = int(args[3])
+def build_config(yaml_path: Path) -> Wham2DConfig:
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"YAML configuration file not found: {yaml_path}")
 
-    periodic_y, period_y = parse_periodic(args[4])
-    hist_min_y = float(args[5])
-    hist_max_y = float(args[6])
-    num_bins_y = int(args[7])
+    config = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError("YAML configuration must define a mapping of parameters")
 
-    tolerance = float(args[8])
-    temperature = float(args[9])
-    numpad = int(args[10])
-    metadata = Path(args[11])
-    freefile = Path(args[12])
-    use_mask = bool(int(args[13]))
+    k_B = parse_units(config.get("units"))
+    periodic_x, period_x = parse_periodic(config, "x")
+    periodic_y, period_y = parse_periodic(config, "y")
+
+    required_fields = [
+        "hist_min_x",
+        "hist_max_x",
+        "num_bins_x",
+        "hist_min_y",
+        "hist_max_y",
+        "num_bins_y",
+        "tolerance",
+        "temperature",
+        "numpad",
+        "metadata_file",
+        "freefile",
+        "use_mask",
+    ]
+    for field in required_fields:
+        if field not in config:
+            raise ValueError(f"Missing required configuration field: {field}")
 
     return Wham2DConfig(
-        hist_min_x=hist_min_x,
-        hist_max_x=hist_max_x,
-        num_bins_x=num_bins_x,
-        hist_min_y=hist_min_y,
-        hist_max_y=hist_max_y,
-        num_bins_y=num_bins_y,
-        tolerance=tolerance,
-        temperature=temperature,
-        numpad=numpad,
-        metadata_path=metadata,
-        freefile_path=freefile,
-        use_mask=use_mask,
+        hist_min_x=float(config["hist_min_x"]),
+        hist_max_x=float(config["hist_max_x"]),
+        num_bins_x=int(config["num_bins_x"]),
+        hist_min_y=float(config["hist_min_y"]),
+        hist_max_y=float(config["hist_max_y"]),
+        num_bins_y=int(config["num_bins_y"]),
+        tolerance=float(config["tolerance"]),
+        temperature=float(config["temperature"]),
+        numpad=int(config["numpad"]),
+        metadata_path=Path(config["metadata_file"]),
+        freefile_path=Path(config["freefile"]),
+        use_mask=bool(config["use_mask"]),
         periodic_x=periodic_x,
         period_x=period_x,
         periodic_y=periodic_y,
@@ -589,8 +584,11 @@ def build_config(argv: List[str]) -> Wham2DConfig:
 
 def main(argv: List[str] | None = None) -> None:
     args = sys.argv[1:] if argv is None else argv
-    print("#" + " ".join(args))
-    config = build_config(args)
+    if len(args) != 1:
+        raise ValueError("wham-2d now expects a single argument: path to a YAML configuration file")
+    yaml_path = Path(args[0])
+    print(f"# Loading configuration from {yaml_path}")
+    config = build_config(yaml_path)
     wham = Wham2D(config)
     wham.run()
 

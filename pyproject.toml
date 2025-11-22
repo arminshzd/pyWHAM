@@ -5,7 +5,7 @@ description = "Python translation of the WHAM implementations"
 readme = "README.md"
 authors = [{ name = "pyWHAM Maintainers" }]
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.23"]
+dependencies = ["numpy>=1.23", "pyyaml>=6"]
 
 [build-system]
 requires = ["setuptools>=64"]

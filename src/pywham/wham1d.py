@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
+import yaml
+
 import numpy as np
 from numpy.random import Generator
 from .structures import HistGroup1D, Histogram1D
@@ -432,92 +434,87 @@ class Wham1D:
         return min(max(index, 0), num_bins - 1)
 
 
-def parse_units(args: List[str]) -> Tuple[float, List[str]]:
-    if args and args[0] == "units":
-        if len(args) < 2:
-            raise ValueError("Command line: wham [units <real|metal|lj|...>] [P|Ppi|Pval]  hist_min hist_max num_bins tol temperature numpad metadatafile freefile [num_MC_trials randSeed]\n")
-        units = args[1]
-        if units == "lj":
-            k_B = 1.0
-        elif units == "real":
-            k_B = 0.0019872067
-        elif units == "metal":
-            k_B = 8.617343e-5
-        elif units == "si":
-            k_B = 1.3806504e-23
-        elif units == "cgs":
-            k_B = 1.3806504e-16
-        elif units == "electron":
-            k_B = 3.16681534e-6
-        elif units == "micro":
-            k_B = 1.3806504e-8
-        elif units == "nano":
-            k_B = 0.013806504
-        elif units == "default":
-            k_B = k_B_DEFAULT
-        else:
-            raise ValueError(f"Unknown unit style: {units}\n")
-        print(f"# Setting value of k_B to = {k_B:.15g}")
-        return k_B, args[2:]
-    return k_B_DEFAULT, args
+def parse_units(units: str | None) -> float:
+    if units is None:
+        return k_B_DEFAULT
+    if units == "lj":
+        k_B = 1.0
+    elif units == "real":
+        k_B = 0.0019872067
+    elif units == "metal":
+        k_B = 8.617343e-5
+    elif units == "si":
+        k_B = 1.3806504e-23
+    elif units == "cgs":
+        k_B = 1.3806504e-16
+    elif units == "electron":
+        k_B = 3.16681534e-6
+    elif units == "micro":
+        k_B = 1.3806504e-8
+    elif units == "nano":
+        k_B = 0.013806504
+    elif units == "default":
+        k_B = k_B_DEFAULT
+    else:
+        raise ValueError(f"Unknown unit style: {units}\n")
+    print(f"# Setting value of k_B to = {k_B:.15g}")
+    return k_B
 
 
-def parse_periodic(arg: str) -> Tuple[bool, float, int]:
-    periodic = False
-    period = 0.0
-    consumed = 0
-    if arg.upper().startswith("P"):
-        periodic = True
-        suffix = arg[1:]
-        if not suffix:
-            period = DEGREES
-        else:
-            suffix = suffix.upper()
-            if suffix.startswith("PI"):
-                period = RADIANS
-            else:
-                period = float(suffix)
-        print(f"#Turning on periodicity with period = {period}")
-        consumed = 1
-    return periodic, period, consumed
+def parse_periodic(config: dict) -> tuple[bool, float]:
+    periodic = bool(config.get("periodic", False))
+    if not periodic:
+        return False, 0.0
+    period_value = config.get("period", DEGREES)
+    if isinstance(period_value, str) and period_value.lower() == "pi":
+        period = RADIANS
+    else:
+        period = float(period_value)
+    print(f"#Turning on periodicity with period = {period}")
+    return True, period
 
 
-def build_config(argv: List[str]) -> Wham1DConfig:
-    args = argv[:]
-    k_B, args = parse_units(args)
-    periodic, period, consumed = parse_periodic(args[0])
-    if consumed:
-        args = args[1:]
-    if len(args) not in (8, 10):
-        raise ValueError(
-            "Command line: wham [units <real|metal|lj|...>] [P|Ppi|Pval]  hist_min hist_max num_bins tol temperature numpad metadatafile freefile [num_MC_trials randSeed]\n"
-        )
+def build_config(yaml_path: Path) -> Wham1DConfig:
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"YAML configuration file not found: {yaml_path}")
 
-    hist_min = float(args[0])
-    hist_max = float(args[1])
-    num_bins = int(args[2])
-    tol = float(args[3])
-    temperature = float(args[4])
-    numpad = int(args[5])
-    metadata = Path(args[6])
-    freefile = Path(args[7])
+    config = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise ValueError("YAML configuration must define a mapping of parameters")
 
-    num_mc = 0
-    seed = None
-    if len(args) == 10:
-        num_mc = int(args[8])
-        seed = int(args[9])
+    k_B = parse_units(config.get("units"))
+    periodic, period = parse_periodic(config)
+
+    required_fields = [
+        "hist_min",
+        "hist_max",
+        "num_bins",
+        "tolerance",
+        "temperature",
+        "numpad",
+        "metadata_file",
+        "freefile",
+    ]
+    for field in required_fields:
+        if field not in config:
+            raise ValueError(f"Missing required configuration field: {field}")
+
+    num_mc = int(config.get("num_mc_runs", 0))
+    seed = config.get("mc_seed")
+    if seed is not None:
+        seed = int(seed)
         if seed > 0:
             seed = -seed
+
     return Wham1DConfig(
-        hist_min=hist_min,
-        hist_max=hist_max,
-        num_bins=num_bins,
-        tolerance=tol,
-        temperature=temperature,
-        numpad=numpad,
-        metadata_path=metadata,
-        freefile_path=freefile,
+        hist_min=float(config["hist_min"]),
+        hist_max=float(config["hist_max"]),
+        num_bins=int(config["num_bins"]),
+        tolerance=float(config["tolerance"]),
+        temperature=float(config["temperature"]),
+        numpad=int(config["numpad"]),
+        metadata_path=Path(config["metadata_file"]),
+        freefile_path=Path(config["freefile"]),
         periodic=periodic,
         period=period,
         k_B=k_B,
@@ -528,8 +525,11 @@ def build_config(argv: List[str]) -> Wham1DConfig:
 
 def main(argv: List[str] | None = None) -> None:
     args = sys.argv[1:] if argv is None else argv
-    print("#" + " ".join(args))
-    config = build_config(args)
+    if len(args) != 1:
+        raise ValueError("wham now expects a single argument: path to a YAML configuration file")
+    yaml_path = Path(args[0])
+    print(f"# Loading configuration from {yaml_path}")
+    config = build_config(yaml_path)
     wham = Wham1D(config)
     wham.run()
 
