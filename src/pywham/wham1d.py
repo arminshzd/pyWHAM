@@ -127,8 +127,7 @@ class Wham1D:
                     count += 1
         return count
 
-    def read_metadata(self, meta_path: Path, hist_group: HistGroup1D) -> Tuple[int, bool]:
-        lines = meta_path.read_text(encoding="utf-8").splitlines()
+    def read_metadata(self, lines: Iterable[str], hist_group: HistGroup1D) -> Tuple[int, bool]:
         current_window = 0
         have_temp = False
         have_notemp = False
@@ -277,7 +276,7 @@ class Wham1D:
         print(f"#Number of windows = {num_windows}")
 
         hist_group = self.make_hist_group(num_windows)
-        count_windows, have_temp = self.read_metadata(self.config.metadata_path, hist_group)
+        count_windows, have_temp = self.read_metadata(lines, hist_group)
         assert count_windows == hist_group.num_windows
 
         if have_temp:

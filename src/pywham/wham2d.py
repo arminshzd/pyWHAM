@@ -166,9 +166,8 @@ class Wham2D:
         return count
 
     def read_metadata(
-        self, meta_path: Path, hist_group: HistGroup2D, use_mask: bool, mask: List[List[int]] | None
+        self, lines: Iterable[str], hist_group: HistGroup2D, use_mask: bool, mask: List[List[int]] | None
     ) -> Tuple[int, bool]:
-        lines = meta_path.read_text(encoding="utf-8").splitlines()
         current_window = 0
         have_temp = False
         have_notemp = False
@@ -350,7 +349,7 @@ class Wham2D:
             mask = [[0 for _ in range(self.config.num_bins_y)] for _ in range(self.config.num_bins_x)]
 
         hist_group = self.make_hist_group(num_windows)
-        count_windows, have_temp = self.read_metadata(self.config.metadata_path, hist_group, self.config.use_mask, mask)
+        count_windows, have_temp = self.read_metadata(lines, hist_group, self.config.use_mask, mask)
         assert count_windows == hist_group.num_windows
 
         if have_temp:
