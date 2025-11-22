@@ -33,7 +33,7 @@ python -m pywham.wham1d examples/output/umbrella_metadata.txt \
 
 Example YAML configuration (`examples/umbrella_config.yaml`):
 ```
-centers: [-2, -1, 0, 1, 2]
+centers: [-1, -0.5, 0, 0.5, 1]
 spring_constant: 10.0
 temperature: 1.0
 friction: 1.0
@@ -107,7 +107,12 @@ def langevin_integrator(
     stride: int,
     random_state: np.random.Generator,
 ) -> List[Tuple[int, float, float]]:
-    """Run overdamped Langevin dynamics with an umbrella restraint."""
+    """Run overdamped Langevin dynamics with an umbrella restraint.
+
+    The update follows the overdamped equation dx = (F/γ) dt + sqrt(2 k_B T / γ)
+    dW and clips positions to [-1, 1] each step to keep the stiff test potential
+    numerically stable.
+    """
 
     x = float(x0)
     diffusion = (2.0 * k_B * temperature) / friction
@@ -116,9 +121,10 @@ def langevin_integrator(
     records: List[Tuple[int, float, float]] = []
     for step in range(steps):
         total_force = potential_force(x) + umbrella_force(x, center, spring_constant)
-        deterministic = -(total_force / friction) * time_step
+        deterministic = (total_force / friction) * time_step
         stochastic = noise_scale * random_state.normal()
         x += deterministic + stochastic
+        x = float(np.clip(x, -1.0, 1.0))
 
         if step % stride == 0:
             bias_energy = umbrella_energy(x, center, spring_constant)
@@ -170,7 +176,7 @@ def parse_config() -> dict:
         config = yaml.safe_load(handle) or {}
 
     defaults = {
-        "centers": [-2.0, -1.0, 0.0, 1.0, 2.0],
+        "centers": [-1.0, -0.5, 0.0, 0.5, 1.0],
         "spring_constant": 10.0,
         "temperature": 1.0,
         "friction": 1.0,
