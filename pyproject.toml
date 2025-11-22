@@ -1,0 +1,15 @@
+[project]
+name = "pywham"
+version = "0.1.0"
+description = "Python translation of the WHAM implementations"
+readme = "README.md"
+authors = [{ name = "pyWHAM Maintainers" }]
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+wham = "pywham.wham1d:main"
+"wham-2d" = "pywham.wham2d:main"
