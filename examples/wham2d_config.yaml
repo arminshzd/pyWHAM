@@ -1,0 +1,16 @@
+hist_min_x: -1.5
+hist_max_x: 1.2
+num_bins_x: 120
+hist_min_y: -0.2
+hist_max_y: 2.0
+num_bins_y: 120
+tolerance: 1e-5
+temperature: 1.0
+numpad: 0
+metadata_file: examples/output_2d/umbrella_metadata_2d.txt
+freefile: examples/output_2d/free_energy_2d.dat
+use_mask: false
+periodic_x: false
+period_x: 0
+periodic_y: false
+period_y: 0

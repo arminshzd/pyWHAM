@@ -1,0 +1,19 @@
+# Example configuration for 2D umbrella sampling
+centers:
+  - [-1.0, 0.0]
+  - [-1.0, 1.0]
+  - [-0.5, 0.5]
+  - [-0.5, 1.5]
+  - [0.0, 0.5]
+  - [0.0, 1.5]
+spring_constant_x: 25.0
+spring_constant_y: 25.0
+temperature: 1.0
+friction: 1.0
+time_step: 0.001
+steps: 200000
+stride: 100
+correlation_time: 10.0
+output_dir: examples/output_2d
+metadata_name: umbrella_metadata_2d.txt
+seed: 4321
