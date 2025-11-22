@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
-from .nr import Ran2Generator
-from .nr import locate
+import numpy as np
+from numpy.random import Generator
 from .structures import HistGroup1D, Histogram1D
 
 DEGREES = 360.0
@@ -345,7 +345,7 @@ class Wham1D:
         ave_F2 = [0.0 for _ in ave_F2]
 
         if self.config.num_mc_runs > 0:
-            generator = Ran2Generator(self.config.mc_seed if self.config.mc_seed is not None else -1)
+            generator = np.random.default_rng(self.config.mc_seed if self.config.mc_seed is not None else 1)
             for i in range(self.config.num_mc_runs):
                 for j in range(hist_group.num_windows):
                     hist = hist_group.histograms[j]
@@ -419,7 +419,7 @@ class Wham1D:
                 freefile.write(f"#{i}\t{final_f[i]}\t{ave_F2[i]}\n")
 
     def mk_new_hist(
-        self, cumulative: List[float], distribution: List[float], num_bins: int, num_points: int, generator: Ran2Generator
+        self, cumulative: List[float], distribution: List[float], num_bins: int, num_points: int, generator: Generator
     ) -> None:
         for i in range(num_bins):
             distribution[i] = 0.0
@@ -427,9 +427,10 @@ class Wham1D:
             j = self.get_rand_bin(cumulative, num_bins, generator)
             distribution[j] += 1.0
 
-    def get_rand_bin(self, cumulative: List[float], num_bins: int, generator: Ran2Generator) -> int:
+    def get_rand_bin(self, cumulative: List[float], num_bins: int, generator: Generator) -> int:
         value = generator.random()
-        return locate(cumulative, value)
+        index = np.searchsorted(cumulative, value, side="right") - 1
+        return min(max(index, 0), num_bins - 1)
 
 
 def parse_units(args: List[str]) -> Tuple[float, List[str]]:
