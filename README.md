@@ -1,5 +1,7 @@
 # Python implementation of WHAM
 
+This is a python implementation of the Weighted Histogram Analysis Method (WHAM). The logic of this package is adapted from Prof. Alan [Grossfield's WHAM](http://membrane.urmc.rochester.edu/?page_id=126) code with a few improvement and QoL features.
+
 ## Usage
 
 The command line interfaces now accept a single argument: the path to a YAML file
