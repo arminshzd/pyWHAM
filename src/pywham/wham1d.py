@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 import sys
+import concurrent.futures
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Tuple
@@ -34,6 +36,7 @@ class Wham1DConfig:
     k_B: float
     num_mc_runs: int = 0
     mc_seed: int | None = None
+    mc_workers: int | None = None
 
     @property
     def bin_width(self) -> float:
@@ -238,6 +241,7 @@ class Wham1D:
         previous = np.asarray(hist_group.previous_free_energies, dtype=float)
         return float(np.mean(np.abs(current - previous)))
 
+
     def calc_free(self, probabilities: List[float]) -> Tuple[List[float], int]:
         free = [-self.config.kT * math.log(p) for p in probabilities]
         min_val = min(free)
@@ -359,41 +363,55 @@ class Wham1D:
         ave_F2 = [0.0 for _ in ave_F2]
 
         if self.config.num_mc_runs > 0:
-            generator = np.random.default_rng(self.config.mc_seed if self.config.mc_seed is not None else 1)
-            for i in range(self.config.num_mc_runs):
-                for j in range(hist_group.num_windows):
-                    hist = hist_group.histograms[j]
-                    num_used = hist.last - hist.first + 1
-                    self.mk_new_hist(hist.cumulative, hist.data, num_used, hist.num_mc_samples, generator)
-                    hist_group.previous_free_energies[j] = 0.0
-                    hist_group.free_energies[j] = 0.0
+            base_hist_group = _clone_hist_group(hist_group)
+            seed_value = self.config.mc_seed if self.config.mc_seed is not None else 1
+            seed_sequence = np.random.SeedSequence(seed_value)
+            seeds = [int(s.generate_state(1)[0]) for s in seed_sequence.spawn(self.config.num_mc_runs)]
 
-                iteration = 0
-                first = True
-                while not self.is_converged(hist_group) or first:
-                    first = False
-                    self.save_free(hist_group)
-                    self.wham_iteration(hist_group, probabilities, have_energy)
-                    iteration += 1
-                    if iteration >= 100000:
-                        print(f"Too many iterations: {iteration}")
-                        break
-                print(f"#MC trial {i}: {iteration} iterations")
+            workers = self.config.mc_workers
+            if workers is None:
+                workers = os.cpu_count() or 1
+            workers = max(1, min(workers, self.config.num_mc_runs))
+
+            if workers == 1:
+                results = [
+                    _run_bootstrap_trial(i, self.config, base_hist_group, have_energy, seeds[i])
+                    for i in range(self.config.num_mc_runs)
+                ]
+            else:
+                results: List[BootstrapResult] = [None for _ in range(self.config.num_mc_runs)]  # type: ignore
+                with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+                    futures = {
+                        executor.submit(
+                            _run_bootstrap_trial,
+                            i,
+                            self.config,
+                            base_hist_group,
+                            have_energy,
+                            seeds[i],
+                        ): i
+                        for i in range(self.config.num_mc_runs)
+                    }
+                    for future in concurrent.futures.as_completed(futures):
+                        idx = futures[future]
+                        results[idx] = future.result()
+
+            for result in results:
+                if result.too_many_iterations:
+                    print(f"Too many iterations: {result.iterations}")
+                print(f"#MC trial {result.trial_index}: {result.iterations} iterations")
                 print("#PMF values")
 
-                total = sum(probabilities)
                 for j in range(self.config.num_bins):
-                    probabilities[j] /= total
-
-                for j in range(self.config.num_bins):
-                    pdf = -self.config.kT * math.log(probabilities[j])
-                    ave_p[j] += probabilities[j]
+                    probability = result.probabilities[j]
+                    pdf = result.pdf[j]
+                    ave_p[j] += probability
                     ave_pdf[j] += pdf
-                    ave_p2[j] += probabilities[j] * probabilities[j]
+                    ave_p2[j] += probability * probability
                     ave_pdf2[j] += pdf * pdf
                 for j in range(hist_group.num_windows):
-                    ave_F[j] += hist_group.free_energies[j] - hist_group.free_energies[0]
-                    ave_F2[j] += hist_group.free_energies[j] * hist_group.free_energies[j]
+                    ave_F[j] += result.free_energies[j] - result.free_energies[0]
+                    ave_F2[j] += result.free_energies[j] * result.free_energies[j]
 
             for i in range(self.config.num_bins):
                 ave_p[i] /= float(self.config.num_mc_runs)
@@ -445,6 +463,87 @@ class Wham1D:
         value = generator.random()
         index = np.searchsorted(cumulative, value, side="right") - 1
         return min(max(index, 0), num_bins - 1)
+
+
+@dataclass
+class BootstrapResult:
+    trial_index: int
+    iterations: int
+    probabilities: List[float]
+    pdf: List[float]
+    free_energies: List[float]
+    too_many_iterations: bool = False
+
+
+def _clone_hist_group(base: HistGroup1D) -> HistGroup1D:
+    histograms = [
+        Histogram1D(
+            first=hist.first,
+            last=hist.last,
+            num_points=hist.num_points,
+            num_mc_samples=hist.num_mc_samples,
+            data=list(hist.data),
+            cumulative=list(hist.cumulative),
+        )
+        for hist in base.histograms
+    ]
+    return HistGroup1D(
+        num_windows=base.num_windows,
+        bias_locations=list(base.bias_locations),
+        spring_constants=list(base.spring_constants),
+        free_energies=[0.0 for _ in base.free_energies],
+        previous_free_energies=[0.0 for _ in base.previous_free_energies],
+        temperatures=list(base.temperatures),
+        partitions=list(base.partitions),
+        histograms=histograms,
+    )
+
+
+def _run_bootstrap_trial(
+    trial_index: int,
+    config: Wham1DConfig,
+    base_hist_group: HistGroup1D,
+    have_energy: bool,
+    seed: int,
+) -> BootstrapResult:
+    wham = Wham1D(config)
+    hist_group = _clone_hist_group(base_hist_group)
+    generator = np.random.default_rng(seed)
+    probabilities = [0.0 for _ in range(config.num_bins)]
+
+    for j in range(hist_group.num_windows):
+        hist = hist_group.histograms[j]
+        num_used = hist.last - hist.first + 1
+        wham.mk_new_hist(hist.cumulative, hist.data, num_used, hist.num_mc_samples, generator)
+        hist_group.previous_free_energies[j] = 0.0
+        hist_group.free_energies[j] = 0.0
+
+    iteration = 0
+    first = True
+    too_many_iterations = False
+    while not wham.is_converged(hist_group) or first:
+        first = False
+        wham.save_free(hist_group)
+        wham.wham_iteration(hist_group, probabilities, have_energy)
+        iteration += 1
+        if iteration >= 100000:
+            too_many_iterations = True
+            break
+
+    total = sum(probabilities)
+    if total:
+        probabilities = [p / total for p in probabilities]
+
+    pdf = [-config.kT * math.log(p) if p > 0.0 else float("inf") for p in probabilities]
+
+    return BootstrapResult(
+        trial_index=trial_index,
+        iterations=iteration,
+        probabilities=probabilities,
+        pdf=pdf,
+        free_energies=list(hist_group.free_energies),
+        too_many_iterations=too_many_iterations,
+    )
 
 
 def parse_units(units: str | None) -> float:
@@ -518,6 +617,11 @@ def build_config(yaml_path: Path) -> Wham1DConfig:
         seed = int(seed)
         if seed > 0:
             seed = -seed
+    workers = config.get("mc_workers")
+    if workers is not None:
+        workers = int(workers)
+        if workers < 1:
+            workers = 1
 
     return Wham1DConfig(
         hist_min=float(config["hist_min"]),
@@ -533,6 +637,7 @@ def build_config(yaml_path: Path) -> Wham1DConfig:
         k_B=k_B,
         num_mc_runs=num_mc,
         mc_seed=seed,
+        mc_workers=workers,
     )
 
 
