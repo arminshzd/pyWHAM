@@ -95,17 +95,17 @@ def test_is_metadata_and_numwindows(wham: Wham1D) -> None:
 def test_read_data_energy_and_range(tmp_path: Path, wham: Wham1D) -> None:
     datafile = tmp_path / "data.dat"
     datafile.write_text("0 0.5 0\n1 1.5 0\n#2 0.2 0\n", encoding="utf-8")
-    count = wham.read_data(datafile, have_energy=True)
+    histogram, count = Wham1D.read_data(datafile, have_energy=True, config=wham.config)
     assert count == 2
-    assert wham.histogram == [1.0, 1.0]
-    assert wham._find_range() == (0, 1)
+    assert histogram == [1.0, 1.0]
+    assert Wham1D._find_range(histogram) == (0, 1)
 
 
 def test_read_data_invalid_columns(tmp_path: Path, wham: Wham1D) -> None:
     datafile = tmp_path / "bad.dat"
     datafile.write_text("0 0.5\n", encoding="utf-8")
     with pytest.raises(ValueError):
-        wham.read_data(datafile, have_energy=True)
+        Wham1D.read_data(datafile, have_energy=True, config=wham.config)
 
 
 def _prepare_metadata_files(tmp_path: Path) -> tuple[Path, Path]:

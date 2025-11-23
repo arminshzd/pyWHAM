@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import math
-import sys
 import concurrent.futures
+import math
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Tuple
@@ -37,6 +37,7 @@ class Wham1DConfig:
     num_mc_runs: int = 0
     mc_seed: int | None = None
     mc_workers: int | None = None
+    ingest_workers: int | None = None
 
     @property
     def bin_width(self) -> float:
@@ -103,8 +104,9 @@ class Wham1D:
     def get_numwindows(self, metadata: Iterable[str]) -> int:
         return sum(1 for line in metadata if self.is_metadata(line))
 
-    def read_data(self, filename: Path, have_energy: bool) -> int:
-        self.clear_histogram()
+    @staticmethod
+    def read_data(filename: Path, have_energy: bool, config: Wham1DConfig) -> Tuple[list[float], int]:
+        histogram = [0.0 for _ in range(config.num_bins)]
         count = 0
         with filename.open("r", encoding="utf-8") as handle:
             for raw in handle:
@@ -123,17 +125,17 @@ class Wham1D:
                     _, value_s = parts[:2]
                     value = float(value_s)
                     energy = 0.0
-                if self.config.hist_min < value < self.config.hist_max:
-                    index = int((value - self.config.hist_min) / self.config.bin_width)
+                if config.hist_min < value < config.hist_max:
+                    index = int((value - config.hist_min) / config.bin_width)
                     if have_energy:
-                        self.histogram[index] += math.exp(-energy / self.config.kT)
+                        histogram[index] += math.exp(-energy / config.kT)
                     else:
-                        self.histogram[index] += 1.0
+                        histogram[index] += 1.0
                     count += 1
-        return count
+        return histogram, count
 
     def read_metadata(self, lines: Iterable[str], hist_group: HistGroup1D) -> Tuple[int, bool]:
-        current_window = 0
+        entries: list[MetadataEntry] = []
         have_temp = False
         have_notemp = False
 
@@ -147,79 +149,99 @@ class Wham1D:
             correl_time = float(tokens[3]) if len(tokens) >= 4 else 1.0
             temp = float(tokens[4]) if len(tokens) >= 5 else -1.0
 
-            hist_group.bias_locations[current_window] = loc
-            hist_group.spring_constants[current_window] = spring
-
             if len(tokens) > 4:
-                hist_group.temperatures[current_window] = temp * self.config.k_B
                 have_temp = True
             else:
-                hist_group.temperatures[current_window] = -1.0
                 have_notemp = True
 
-            if (have_temp and have_notemp) or (not have_temp and not have_notemp):
-                raise ValueError("Some but not all metadata lines specify a temperature")
-
-            num_points = self.read_data(filename, have_temp)
-            if num_points < 0:
-                raise OSError(f"Error trying to read {filename}")
-
-            mc_samples = int(num_points / correl_time)
-            if mc_samples < 1:
-                print(f"# Correl time is too big for {filename}")
-                print(f"# You have {num_points} points, correl time {correl_time}")
-                print("# Bootstrap error analysis will crash")
-
-            min_nonzero, max_nonzero = self._find_range()
-            if min_nonzero > max_nonzero:
-                raise ValueError(
-                    "No data points within histogram bounds "
-                    f"[{self.config.hist_min}, {self.config.hist_max}]"
+            entries.append(
+                MetadataEntry(
+                    index=len(entries),
+                    filename=filename,
+                    loc=loc,
+                    spring=spring,
+                    correl_time=correl_time,
+                    temp=temp,
                 )
+            )
 
-            trimmed = self.hist_alloc(min_nonzero, max_nonzero, num_points, mc_samples)
-            for i in range(min_nonzero, max_nonzero + 1):
-                trimmed.data[i - min_nonzero] = self.histogram[i]
-                if i == min_nonzero:
-                    trimmed.cumulative[0] = 0.0
-                else:
-                    trimmed.cumulative[i - min_nonzero] = (
-                        trimmed.cumulative[i - min_nonzero - 1] + self.histogram[i - 1]
-                    )
+        if (have_temp and have_notemp) or (not have_temp and not have_notemp):
+            raise ValueError("Some but not all metadata lines specify a temperature")
 
-            num_used = max_nonzero - min_nonzero
-            total = trimmed.cumulative[num_used] + self.histogram[max_nonzero]
-            for i in range(num_used + 1):
-                trimmed.cumulative[i] /= total
-            hist_group.histograms[current_window] = trimmed
-            hist_group.partitions[current_window] = total
-            current_window += 1
+        worker_count = self._ingest_worker_count()
+        have_energy = have_temp
 
-        return current_window, have_temp
+        results: list[WindowLoadResult] = []
+        if worker_count > 1:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=worker_count) as pool:
+                future_map = {
+                    pool.submit(_load_window_data, entry, have_energy, self.config): entry
+                    for entry in entries
+                }
+                for future in concurrent.futures.as_completed(future_map):
+                    entry = future_map[future]
+                    try:
+                        results.append(future.result())
+                    except Exception as exc:  # pragma: no cover - defensive
+                        raise RuntimeError(f"Failed to load {entry.filename}: {exc}") from exc
+        else:
+            for entry in entries:
+                results.append(_load_window_data(entry, have_energy, self.config))
 
-    def _find_range(self) -> Tuple[int, int]:
+        results.sort(key=lambda item: item.index)
+
+        for entry, result in zip(entries, results):
+            hist_group.bias_locations[entry.index] = entry.loc
+            hist_group.spring_constants[entry.index] = entry.spring
+            if have_energy:
+                hist_group.temperatures[entry.index] = entry.temp * self.config.k_B
+            else:
+                hist_group.temperatures[entry.index] = -1.0
+            hist_group.histograms[entry.index] = result.histogram
+            hist_group.partitions[entry.index] = result.partition
+            for warning in result.warnings:
+                print(warning)
+
+        return len(entries), have_temp
+
+    @staticmethod
+    def _find_range(histogram: list[float]) -> Tuple[int, int]:
         min_nonzero = 0
-        max_nonzero = self.config.num_bins - 1
+        max_nonzero = len(histogram) - 1
 
         still_zero = True
         i = 0
-        while still_zero and i < self.config.num_bins:
-            if self.histogram[i] > 0:
+        while still_zero and i < len(histogram):
+            if histogram[i] > 0:
                 still_zero = False
             else:
                 i += 1
         min_nonzero = i
 
         still_zero = True
-        i = self.config.num_bins - 1
+        i = len(histogram) - 1
         while still_zero and i >= min_nonzero:
-            if self.histogram[i] > 0:
+            if histogram[i] > 0:
                 still_zero = False
             else:
                 i -= 1
         max_nonzero = i
 
         return min_nonzero, max_nonzero
+
+    def _ingest_worker_count(self) -> int:
+        if os.getenv("PYWHAM_DISABLE_PARALLEL"):
+            return 1
+        if self.config.ingest_workers is not None:
+            return max(int(self.config.ingest_workers), 1)
+        env_workers = os.getenv("PYWHAM_INGEST_WORKERS")
+        if env_workers:
+            try:
+                return max(int(env_workers), 1)
+            except ValueError:
+                pass
+        return max(os.cpu_count() or 1, 1)
+
 
     def get_histval(self, hist: Histogram1D, index: int) -> float:
         if index < hist.first or index > hist.last:
@@ -466,6 +488,90 @@ class Wham1D:
 
 
 @dataclass
+class MetadataEntry:
+    index: int
+    filename: Path
+    loc: float
+    spring: float
+    correl_time: float
+    temp: float
+
+
+@dataclass
+class WindowLoadResult:
+    index: int
+    histogram: Histogram1D
+    partition: float
+    min_nonzero: int
+    max_nonzero: int
+    warnings: list[str]
+
+
+def _build_histogram(
+    histogram: list[float],
+    num_points: int,
+    correl_time: float,
+    config: Wham1DConfig,
+    source: Path,
+) -> tuple[Histogram1D, float, list[str]]:
+    min_nonzero, max_nonzero = Wham1D._find_range(histogram)
+    if min_nonzero > max_nonzero:
+        raise ValueError(
+            "No data points within histogram bounds "
+            f"[{config.hist_min}, {config.hist_max}]"
+        )
+
+    mc_samples = int(num_points / correl_time)
+    warnings: list[str] = []
+    if mc_samples < 1:
+        warnings.append(f"# Correl time is too big for {source}")
+        warnings.append(f"# You have {num_points} points, correl time {correl_time}")
+        warnings.append("# Bootstrap error analysis will crash")
+
+    num_used = max_nonzero - min_nonzero
+    trimmed = Histogram1D(
+        first=min_nonzero,
+        last=max_nonzero,
+        num_points=num_points,
+        num_mc_samples=mc_samples,
+        data=[0.0 for _ in range(num_used + 1)],
+        cumulative=[0.0 for _ in range(num_used + 1)],
+    )
+
+    for i in range(min_nonzero, max_nonzero + 1):
+        trimmed.data[i - min_nonzero] = histogram[i]
+        if i == min_nonzero:
+            trimmed.cumulative[0] = 0.0
+        else:
+            trimmed.cumulative[i - min_nonzero] = trimmed.cumulative[i - min_nonzero - 1] + histogram[i - 1]
+
+    total = trimmed.cumulative[num_used] + histogram[max_nonzero]
+    for i in range(num_used + 1):
+        trimmed.cumulative[i] /= total
+
+    return trimmed, total, warnings
+
+
+def _load_window_data(entry: MetadataEntry, have_energy: bool, config: Wham1DConfig) -> WindowLoadResult:
+    histogram, num_points = Wham1D.read_data(entry.filename, have_energy, config)
+    if num_points < 0:
+        raise OSError(f"Error trying to read {entry.filename}")
+
+    trimmed, partition, warnings = _build_histogram(
+        histogram, num_points, entry.correl_time, config, entry.filename
+    )
+
+    return WindowLoadResult(
+        index=entry.index,
+        histogram=trimmed,
+        partition=partition,
+        min_nonzero=trimmed.first,
+        max_nonzero=trimmed.last,
+        warnings=warnings,
+    )
+
+
+@dataclass
 class BootstrapResult:
     trial_index: int
     iterations: int
@@ -622,6 +728,11 @@ def build_config(yaml_path: Path) -> Wham1DConfig:
         workers = int(workers)
         if workers < 1:
             workers = 1
+    ingest_workers = config.get("ingest_workers")
+    if ingest_workers is not None:
+        ingest_workers = int(ingest_workers)
+        if ingest_workers < 1:
+            ingest_workers = 1
 
     return Wham1DConfig(
         hist_min=float(config["hist_min"]),
@@ -638,6 +749,7 @@ def build_config(yaml_path: Path) -> Wham1DConfig:
         num_mc_runs=num_mc,
         mc_seed=seed,
         mc_workers=workers,
+        ingest_workers=ingest_workers,
     )
 
 
