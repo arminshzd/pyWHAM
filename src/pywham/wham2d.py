@@ -19,7 +19,7 @@ from .structures import HistGroup2D, Histogram2D
 DEGREES = 360.0
 RADIANS = 6.28318530717959
 k_B_DEFAULT = 0.0019829237
-MASKED = 9999999.0
+MASKED = np.inf
 
 
 @dataclass
