@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import math
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
 import numpy as np
+from numpy.random import Generator
 import yaml
 
 from .structures import HistGroup2D, Histogram2D
@@ -40,6 +43,10 @@ class Wham2DConfig:
     k_B: float
     use_float32: bool = False
     bias_chunk_size: int | None = None
+    num_mc_runs: int = 0
+    mc_seed: int | None = None
+    mc_workers: int | None = None
+    freefile_error_path: Path | None = None
 
     @property
     def bin_width_x(self) -> float:
@@ -316,6 +323,33 @@ class Wham2D:
                     free[i][j] -= min_val
         return free
 
+    def mk_new_hist(
+        self,
+        cumulative: List[float],
+        distribution: List[List[float]],
+        first_x: int,
+        last_x: int,
+        first_y: int,
+        last_y: int,
+        num_points: int,
+        generator: Generator,
+    ) -> None:
+        num_x = last_x - first_x + 1
+        num_y = last_y - first_y + 1
+        for i in range(num_x):
+            for j in range(num_y):
+                distribution[i][j] = 0.0
+        for _ in range(num_points):
+            bin_index = self.get_rand_bin(cumulative, num_x * num_y, generator)
+            x_offset = bin_index // num_y
+            y_offset = bin_index % num_y
+            distribution[x_offset][y_offset] += 1.0
+
+    def get_rand_bin(self, cumulative: List[float], num_bins: int, generator: Generator) -> int:
+        value = generator.random()
+        index = np.searchsorted(cumulative, value, side="right") - 1
+        return min(max(int(index), 0), num_bins - 1)
+
     def wham_iteration(
         self,
         hist_group: HistGroup2D,
@@ -482,7 +516,7 @@ class Wham2D:
         for j in range(hist_group.num_windows):
             print(f"# {j}\t{hist_group.free_energies[j] - hist_group.free_energies[0]}")
 
-        free_ene = self.calc_free(prob, self.config.use_mask, mask)
+        free_ene = np.asarray(self.calc_free(prob, self.config.use_mask, mask), dtype=prob.dtype)
         total = float(np.sum(prob))
         if total > 0:
             prob /= total
@@ -494,54 +528,318 @@ class Wham2D:
                     if not mask[i][j]:
                         free_ene[i][j] = MASKED
 
+        prob_std = np.zeros_like(final_prob)
+        free_std = np.zeros_like(final_prob)
+        window_std = np.zeros(hist_group.num_windows, dtype=final_prob.dtype)
+
+        if self.config.num_mc_runs > 0:
+            base_hist_group = _clone_hist_group(hist_group)
+            seed_value = self.config.mc_seed if self.config.mc_seed is not None else 1
+            seed_sequence = np.random.SeedSequence(seed_value)
+            seeds = [int(s.generate_state(1)[0]) for s in seed_sequence.spawn(self.config.num_mc_runs)]
+
+            workers = self.config.mc_workers
+            if workers is None:
+                workers = os.cpu_count() or 1
+            workers = max(1, min(workers, self.config.num_mc_runs))
+
+            results: list[BootstrapResult | None] = [None for _ in range(self.config.num_mc_runs)]
+            with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(
+                        _run_bootstrap_trial,
+                        i,
+                        self.config,
+                        base_hist_group,
+                        have_energy,
+                        mask,
+                        self.config.use_mask,
+                        seeds[i],
+                    ): i
+                    for i in range(self.config.num_mc_runs)
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    idx = futures[future]
+                    results[idx] = future.result()
+
+            ave_prob = np.zeros_like(final_prob)
+            ave_prob2 = np.zeros_like(final_prob)
+            ave_free = np.zeros_like(final_prob)
+            ave_free2 = np.zeros_like(final_prob)
+            ave_window = np.zeros(hist_group.num_windows, dtype=final_prob.dtype)
+            ave_window2 = np.zeros(hist_group.num_windows, dtype=final_prob.dtype)
+
+            for result in results:
+                assert result is not None
+                probabilities = np.asarray(result.probabilities, dtype=final_prob.dtype)
+                free_surface = np.asarray(result.free_energy, dtype=final_prob.dtype)
+                free_biases = np.asarray(result.free_energies, dtype=final_prob.dtype)
+
+                ave_prob += probabilities
+                ave_prob2 += probabilities * probabilities
+                ave_free += free_surface
+                ave_free2 += free_surface * free_surface
+                ave_window += free_biases
+                ave_window2 += free_biases * free_biases
+
+            count = float(self.config.num_mc_runs)
+            ave_prob /= count
+            ave_prob2 /= count
+            prob_std = np.sqrt(np.maximum(ave_prob2 - ave_prob * ave_prob, 0.0))
+
+            ave_free /= count
+            ave_free2 /= count
+            free_std = np.sqrt(np.maximum(ave_free2 - ave_free * ave_free, 0.0))
+
+            ave_window /= count
+            ave_window2 /= count
+            window_std = np.sqrt(np.maximum(ave_window2 - ave_window * ave_window, 0.0))
+        else:
+            print("# No MC error analysis requested")
+
+        header = "#X\t\tY\t\tFree\t\tPro"
+        if self.config.num_mc_runs > 0:
+            header += "\t\tFreeErr\t\tProErr"
+
         with self.config.freefile_path.open("w", encoding="utf-8") as freefile:
-            freefile.write("#X\t\tY\t\tFree\t\tPro\n")
+            freefile.write(f"{header}\n")
             for i in range(-self.config.numpad, 0):
                 for j in range(-self.config.numpad, 0):
                     coor = self.calc_coor(i, j)
                     freefile.write(
-                        f"{coor[0]}\t{coor[1]}\t{free_ene[self.config.num_bins_x + i][self.config.num_bins_y + j]}\t{final_prob[self.config.num_bins_x + i][self.config.num_bins_y + j]}\n"
+                        self._format_free_line(
+                            coor,
+                            free_ene[self.config.num_bins_x + i][self.config.num_bins_y + j],
+                            final_prob[self.config.num_bins_x + i][self.config.num_bins_y + j],
+                            free_std[self.config.num_bins_x + i][self.config.num_bins_y + j],
+                            prob_std[self.config.num_bins_x + i][self.config.num_bins_y + j],
+                        )
                     )
                 for j in range(self.config.num_bins_y):
                     coor = self.calc_coor(i, j)
                     freefile.write(
-                        f"{coor[0]}\t{coor[1]}\t{free_ene[self.config.num_bins_x + i][j]}\t{final_prob[self.config.num_bins_x + i][j]}\n"
+                        self._format_free_line(
+                            coor,
+                            free_ene[self.config.num_bins_x + i][j],
+                            final_prob[self.config.num_bins_x + i][j],
+                            free_std[self.config.num_bins_x + i][j],
+                            prob_std[self.config.num_bins_x + i][j],
+                        )
                     )
                 for j in range(self.config.num_bins_y, self.config.num_bins_y + self.config.numpad):
                     coor = self.calc_coor(i, j)
                     freefile.write(
-                        f"{coor[0]}\t{coor[1]}\t{free_ene[self.config.num_bins_x + i][j - self.config.num_bins_y]}\t{final_prob[self.config.num_bins_x + i][j - self.config.num_bins_y]}\n"
+                        self._format_free_line(
+                            coor,
+                            free_ene[self.config.num_bins_x + i][j - self.config.num_bins_y],
+                            final_prob[self.config.num_bins_x + i][j - self.config.num_bins_y],
+                            free_std[self.config.num_bins_x + i][j - self.config.num_bins_y],
+                            prob_std[self.config.num_bins_x + i][j - self.config.num_bins_y],
+                        )
                     )
             for i in range(self.config.num_bins_x):
                 for j in range(-self.config.numpad, 0):
                     coor = self.calc_coor(i, j)
                     freefile.write(
-                        f"{coor[0]}\t{coor[1]}\t{free_ene[i][self.config.num_bins_y + j]}\t{final_prob[i][self.config.num_bins_y + j]}\n"
+                        self._format_free_line(
+                            coor,
+                            free_ene[i][self.config.num_bins_y + j],
+                            final_prob[i][self.config.num_bins_y + j],
+                            free_std[i][self.config.num_bins_y + j],
+                            prob_std[i][self.config.num_bins_y + j],
+                        )
                     )
                 for j in range(self.config.num_bins_y):
                     coor = self.calc_coor(i, j)
-                    freefile.write(f"{coor[0]}\t{coor[1]}\t{free_ene[i][j]}\t{final_prob[i][j]}\n")
+                    freefile.write(
+                        self._format_free_line(
+                            coor,
+                            free_ene[i][j],
+                            final_prob[i][j],
+                            free_std[i][j],
+                            prob_std[i][j],
+                        )
+                    )
                 for j in range(self.config.num_bins_y, self.config.num_bins_y + self.config.numpad):
                     coor = self.calc_coor(i, j)
                     freefile.write(
-                        f"{coor[0]}\t{coor[1]}\t{free_ene[i][j - self.config.num_bins_y]}\t{final_prob[i][j - self.config.num_bins_y]}\n"
+                        self._format_free_line(
+                            coor,
+                            free_ene[i][j - self.config.num_bins_y],
+                            final_prob[i][j - self.config.num_bins_y],
+                            free_std[i][j - self.config.num_bins_y],
+                            prob_std[i][j - self.config.num_bins_y],
+                        )
                     )
             for i in range(self.config.num_bins_x, self.config.num_bins_x + self.config.numpad):
                 for j in range(-self.config.numpad, 0):
                     coor = self.calc_coor(i, j)
                     freefile.write(
-                        f"{coor[0]}\t{coor[1]}\t{free_ene[i - self.config.num_bins_x][self.config.num_bins_y + j]}\t{final_prob[i - self.config.num_bins_x][self.config.num_bins_y + j]}\n"
+                        self._format_free_line(
+                            coor,
+                            free_ene[i - self.config.num_bins_x][self.config.num_bins_y + j],
+                            final_prob[i - self.config.num_bins_x][self.config.num_bins_y + j],
+                            free_std[i - self.config.num_bins_x][self.config.num_bins_y + j],
+                            prob_std[i - self.config.num_bins_x][self.config.num_bins_y + j],
+                        )
                     )
                 for j in range(self.config.num_bins_y):
                     coor = self.calc_coor(i, j)
                     freefile.write(
-                        f"{coor[0]}\t{coor[1]}\t{free_ene[i - self.config.num_bins_x][j]}\t{final_prob[i - self.config.num_bins_x][j]}\n"
+                        self._format_free_line(
+                            coor,
+                            free_ene[i - self.config.num_bins_x][j],
+                            final_prob[i - self.config.num_bins_x][j],
+                            free_std[i - self.config.num_bins_x][j],
+                            prob_std[i - self.config.num_bins_x][j],
+                        )
                     )
                 for j in range(self.config.num_bins_y, self.config.num_bins_y + self.config.numpad):
                     coor = self.calc_coor(i, j)
                     freefile.write(
-                        f"{coor[0]}\t{coor[1]}\t{free_ene[i - self.config.num_bins_x][j - self.config.num_bins_y]}\t{final_prob[i - self.config.num_bins_x][j - self.config.num_bins_y]}\n"
+                        self._format_free_line(
+                            coor,
+                            free_ene[i - self.config.num_bins_x][j - self.config.num_bins_y],
+                            final_prob[i - self.config.num_bins_x][j - self.config.num_bins_y],
+                            free_std[i - self.config.num_bins_x][j - self.config.num_bins_y],
+                            prob_std[i - self.config.num_bins_x][j - self.config.num_bins_y],
+                        )
                     )
+
+        if self.config.num_mc_runs > 0 and self.config.freefile_error_path is not None:
+            with self.config.freefile_error_path.open("w", encoding="utf-8") as errorfile:
+                errorfile.write("#Window\t\tFreeErr\n")
+                for i in range(hist_group.num_windows):
+                    errorfile.write(f"#{i}\t{window_std[i]}\n")
+
+    def _format_free_line(
+        self,
+        coor: Tuple[float, float],
+        free_val: float,
+        prob_val: float,
+        free_err: float,
+        prob_err: float,
+    ) -> str:
+        if self.config.num_mc_runs > 0:
+            return f"{coor[0]}\t{coor[1]}\t{free_val}\t{prob_val}\t{free_err}\t{prob_err}\n"
+        return f"{coor[0]}\t{coor[1]}\t{free_val}\t{prob_val}\n"
+
+
+@dataclass
+class BootstrapResult:
+    trial_index: int
+    iterations: int
+    probabilities: list[list[float]]
+    free_energy: list[list[float]]
+    free_energies: list[float]
+    too_many_iterations: bool = False
+
+
+def _clone_hist_group(base: HistGroup2D) -> HistGroup2D:
+    histograms = [
+        Histogram2D(
+            first_x=hist.first_x,
+            last_x=hist.last_x,
+            first_y=hist.first_y,
+            last_y=hist.last_y,
+            num_points=hist.num_points,
+            num_mc_samples=hist.num_mc_samples,
+            data=[list(row) for row in hist.data],
+            cumulative=list(hist.cumulative),
+        )
+        for hist in base.histograms
+    ]
+    return HistGroup2D(
+        num_windows=base.num_windows,
+        bias_locations=[list(loc) for loc in base.bias_locations],
+        spring_x=list(base.spring_x),
+        spring_y=list(base.spring_y),
+        free_energies=[1.0 for _ in base.free_energies],
+        previous_free_energies=[1.0 for _ in base.previous_free_energies],
+        temperatures=list(base.temperatures),
+        partitions=list(base.partitions),
+        histograms=histograms,
+    )
+
+
+def _run_bootstrap_trial(
+    trial_index: int,
+    config: Wham2DConfig,
+    base_hist_group: HistGroup2D,
+    have_energy: bool,
+    mask: list[list[int]] | None,
+    use_mask: bool,
+    seed: int,
+) -> BootstrapResult:
+    wham = Wham2D(config)
+    hist_group = _clone_hist_group(base_hist_group)
+    generator = np.random.default_rng(seed)
+    dtype = np.float32 if config.use_float32 else np.float64
+
+    prob = np.zeros((config.num_bins_x, config.num_bins_y), dtype=dtype)
+
+    for j in range(hist_group.num_windows):
+        hist = hist_group.histograms[j]
+        num_x = hist.last_x - hist.first_x + 1
+        num_y = hist.last_y - hist.first_y + 1
+        wham.mk_new_hist(
+            hist.cumulative,
+            hist.data,
+            hist.first_x,
+            hist.last_x,
+            hist.first_y,
+            hist.last_y,
+            hist.num_mc_samples,
+            generator,
+        )
+        hist_group.previous_free_energies[j] = 1.0
+        hist_group.free_energies[j] = 1.0
+
+    x_grid, y_grid = wham._coordinate_grids(dtype)
+    bias_lookup = wham._build_bias_lookup(hist_group, x_grid, y_grid, dtype)
+
+    num_lookup = np.zeros((config.num_bins_x, config.num_bins_y), dtype=dtype)
+    for hist in hist_group.histograms:
+        if hist.num_points == 0:
+            continue
+        x_slice = slice(hist.first_x, hist.last_x + 1)
+        y_slice = slice(hist.first_y, hist.last_y + 1)
+        num_lookup[x_slice, y_slice] += np.asarray(hist.data, dtype=dtype)
+
+    iteration = 0
+    first = True
+    converged = False
+    while not converged or first:
+        first = False
+        wham.save_free(hist_group)
+        wham.wham_iteration(hist_group, prob, have_energy, use_mask, mask, bias_lookup, num_lookup)
+        iteration += 1
+
+        logged_current = [
+            hist_group.temperatures[i] * math.log(hist_group.free_energies[i]) for i in range(hist_group.num_windows)
+        ]
+        logged_previous = [
+            hist_group.temperatures[i] * math.log(hist_group.previous_free_energies[i]) for i in range(hist_group.num_windows)
+        ]
+        converged = wham.is_converged(hist_group, logged_current, logged_previous)
+        if iteration >= 100000:
+            break
+
+    free_energy = wham.calc_free(prob, use_mask, mask)
+    total = float(np.sum(prob))
+    if total > 0:
+        prob = prob / total
+
+    free_biases = [val - hist_group.free_energies[0] for val in hist_group.free_energies]
+
+    return BootstrapResult(
+        trial_index=trial_index,
+        iterations=iteration,
+        probabilities=prob.tolist(),
+        free_energy=free_energy,
+        free_energies=free_biases,
+        too_many_iterations=iteration >= 100000,
+    )
 
 def parse_periodic(config: dict, suffix: str) -> Tuple[bool, float]:
     periodic = bool(config.get(f"periodic_{suffix}", False))
@@ -633,6 +931,10 @@ def build_config(yaml_path: Path) -> Wham2DConfig:
         k_B=k_B,
         use_float32=bool(config.get("use_float32", False)),
         bias_chunk_size=(int(config["bias_chunk_size"]) if "bias_chunk_size" in config else None),
+        num_mc_runs=int(config.get("num_mc_runs", 0)),
+        mc_seed=(int(config["mc_seed"]) if "mc_seed" in config else None),
+        mc_workers=(int(config["mc_workers"]) if "mc_workers" in config else None),
+        freefile_error_path=(Path(config["freefile_error"]) if "freefile_error" in config else None),
     )
 
 
