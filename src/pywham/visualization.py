@@ -227,6 +227,7 @@ def save_free_energy_plots(
     freefile_path: str | Path,
     *,
     output_dir: str | Path | None = None,
+    max_F: float | None = None,
     levels: int = 15,
     cmap: str = "viridis",
     show: bool = False,
@@ -246,6 +247,9 @@ def save_free_energy_plots(
     output_dir:
         Directory for saving the generated plots. Defaults to the directory of
         ``freefile_path``.
+    max_F:
+        Optional cap for the free energy values. Energies greater than this
+        threshold are replaced with ``np.inf`` after parsing the freefile.
     levels:
         Number of contour levels to render for 2D plots.
     cmap:
@@ -275,6 +279,10 @@ def save_free_energy_plots(
         raise ValueError(
             "freefile must contain either five columns (1D WHAM) or four columns (2D WHAM)"
         )
+
+    if max_F is not None:
+        free_energy_col = 1 if data.shape[1] == 5 else 2
+        data[:, free_energy_col] = np.where(data[:, free_energy_col] > max_F, np.inf, data[:, free_energy_col])
 
     outputs: dict[str, Path] = {}
 
