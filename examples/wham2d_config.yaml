@@ -9,7 +9,8 @@ temperature: 1.0
 numpad: 0
 metadata_file: examples/output_2d/umbrella_metadata_2d.txt
 freefile: examples/output_2d/free_energy_2d.dat
-use_mask: false
+use_mask: true
+units: lj
 periodic_x: false
 period_x: 0
 periodic_y: false

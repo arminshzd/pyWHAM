@@ -132,7 +132,11 @@ def langevin_integrator(
     stride: int,
     random_state: np.random.Generator,
 ) -> List[Tuple[int, float, float, float]]:
-    """Run overdamped Langevin dynamics with 2D umbrellas."""
+    r"""Run overdamped Langevin dynamics with 2D umbrellas.
+
+    The update follows the overdamped equation ``dx = (F/γ) dt + \sqrt{2 k_B T / γ} dW``
+    with independent noise in each dimension.
+    """
 
     x = float(x0)
     y = float(y0)
@@ -143,8 +147,8 @@ def langevin_integrator(
     for step in range(steps):
         fx, fy = potential_force(x, y)
         ux, uy = umbrella_force(x, y, center, spring_constant_x, spring_constant_y)
-        deterministic_x = -((fx + ux) / friction) * time_step
-        deterministic_y = -((fy + uy) / friction) * time_step
+        deterministic_x = (fx + ux) / friction * time_step
+        deterministic_y = (fy + uy) / friction * time_step
         stochastic_x = noise_scale * random_state.normal()
         stochastic_y = noise_scale * random_state.normal()
         x += deterministic_x + stochastic_x
