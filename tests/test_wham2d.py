@@ -1,6 +1,7 @@
 import math
 from pathlib import Path
 
+import numpy as np
 import pytest
 import yaml
 
@@ -14,6 +15,7 @@ from pywham.wham2d import (
     main,
     parse_periodic,
     parse_units,
+    _run_bootstrap_trial,
 )
 from pywham.structures import HistGroup2D, Histogram2D
 
@@ -227,13 +229,33 @@ def test_wham_iteration_updates_prob_and_free(basic_config: Wham2DConfig) -> Non
     group.temperatures = [1.0]
     wham.save_free(group)
 
-    prob = [[0.0, 0.0], [0.0, 0.0]]
-    bias_lookup = [[[1.0], [1.0]], [[1.0], [1.0]]]
-    num_lookup = [[10.0, 0.0], [0.0, 0.0]]
+    prob = np.zeros((2, 2))
+    bias_lookup = np.ones((2, 2, 1))
+    num_lookup = np.array([[10.0, 0.0], [0.0, 0.0]])
 
     wham.wham_iteration(group, prob, have_energy=False, use_mask=False, mask=None, bias_lookup=bias_lookup, num_lookup=num_lookup)
     assert prob[0][0] == pytest.approx(2.0)
     assert group.free_energies[0] == pytest.approx(0.5)
+
+
+def test_wham_iteration_stabilizes_near_zero_denominator(basic_config: Wham2DConfig) -> None:
+    wham = Wham2D(basic_config)
+    group = wham.make_hist_group(1)
+    group.histograms[0] = Histogram2D(0, 0, 0, 0, 0, 0, data=[[0.0]])
+    group.free_energies = [0.0]
+    group.previous_free_energies = [0.0]
+    group.temperatures = [1.0]
+
+    prob = np.zeros((2, 2))
+    # Extremely small bias values drive the denominator toward zero
+    bias_lookup = np.full((2, 2, 1), 1e-300)
+    num_lookup = np.zeros((2, 2))
+
+    wham.wham_iteration(group, prob, have_energy=False, use_mask=False, mask=None, bias_lookup=bias_lookup, num_lookup=num_lookup)
+
+    assert all(math.isfinite(value) for row in prob for value in row)
+    assert all(value >= 0.0 for row in prob for value in row)
+    assert all(math.isfinite(value) and value > 0.0 for value in group.free_energies)
 
 
 def test_run_writes_freefile(tmp_path: Path) -> None:
@@ -287,6 +309,28 @@ def test_parse_periodic_and_units() -> None:
     assert pytest.approx(parse_units("real")) == 0.0019872067
     with pytest.raises(ValueError):
         parse_units("units")
+
+
+def test_bootstrap_handles_sparse_histograms(basic_config: Wham2DConfig) -> None:
+    wham = Wham2D(basic_config)
+    hist = Histogram2D(0, 0, 0, 0, 0, 0, data=[[0.0]], cumulative=[0.0, 1.0])
+    base_group = wham.make_hist_group(1)
+    base_group.histograms[0] = hist
+    base_group.temperatures = [1.0]
+
+    result = _run_bootstrap_trial(
+        trial_index=0,
+        config=basic_config,
+        base_hist_group=base_group,
+        have_energy=False,
+        mask=None,
+        use_mask=False,
+        seed=1,
+    )
+
+    assert not result.too_many_iterations
+    assert all(math.isfinite(val) and val >= 0.0 for val in result.free_energies)
+    assert all(math.isfinite(cell) for row in result.probabilities for cell in row)
 
 
 def test_build_config_and_main(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
