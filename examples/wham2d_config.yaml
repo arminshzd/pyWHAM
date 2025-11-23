@@ -7,11 +7,12 @@ num_bins_y: 200
 tolerance: 1e-5
 temperature: 1.0
 numpad: 0
-metadata_file: /Users/arminsh/Documents/pyWHAM/examples/output_2d/umbrella_metadata.txt
-freefile: /Users/arminsh/Documents/pyWHAM/examples/output_2d/output.free
+metadata_file: umbrella_metadata.txt
+freefile: output.free
 use_mask: true
 units: lj
 periodic_x: false
 period_x: 0
 periodic_y: false
 period_y: 0
+num_mc_runs: 100
