@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Python translation of the WHAM implementations"
 readme = "README.md"
 authors = [{ name = "pyWHAM Maintainers" }]
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = ["numpy>=1.23", "pyyaml>=6", "matplotlib>=3.7"]
 
 [build-system]
