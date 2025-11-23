@@ -15,7 +15,7 @@ Configurable parameters (YAML)
 * `time_step`: integrator time step
 * `steps`: total simulation steps
 * `stride`: output stride for saved frames
-* `sub_steps`: number of Euler–Maruyama sub-steps per saved integration step
+* `sub_steps`: number of Euler-Maruyama sub-steps per saved integration step
 * `correlation_time`: correlation time reported to WHAM
 * `output_dir`: directory for trajectory and metadata files
 * `metadata_name`: output metadata filename
@@ -24,28 +24,22 @@ Configurable parameters (YAML)
 Example usage
 -------------
 ```
-python examples/langevin_umbrella.py --config examples/umbrella_config.yaml
+python examples/langevin_umbrella.py --config examples/umbrella_config_1d.yaml
 
-python -m pywham.wham1d examples/output/umbrella_metadata.txt \
-    --have-energy \
-    --hist-min -3.0 --hist-max 3.0 --bin-width 0.02 \
-    --temperature 1.0
+python -m pywham.wham1d examples/wham1d_config.yaml
 ```
 
-Example YAML configuration (`examples/umbrella_config.yaml`):
+Example YAML configuration (`examples/umbrella_config_1d.yaml`):
 ```
-centers: [-1, -0.5, 0, 0.5, 1]
+centers: [-1.0, -0.9, -0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, -0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 spring_constant: 10.0
 temperature: 1.0
 friction: 1.0
 time_step: 0.001
 steps: 200000
 stride: 100
-sub_steps: 10
-correlation_time: 10.0
-output_dir: examples/output
+output_dir: output_1D
 metadata_name: umbrella_metadata.txt
-seed: 1234
 ```
 """
 from __future__ import annotations

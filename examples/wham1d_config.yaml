@@ -1,0 +1,13 @@
+# wham-config.yml
+hist_min: -1.0
+hist_max: 1.0
+num_bins: 50
+tolerance: 1e-5
+temperature: 1.0
+numpad: 0
+metadata_file: /Users/arminsh/Documents/pyWHAM/examples/output_1D/umbrella_metadata.txt
+freefile: /Users/arminsh/Documents/pyWHAM/examples/output_1D/output.free
+# optional parameters
+units: lj               # default uses built-in k_B
+periodic: false            # enable periodic coordinates
+num_mc_runs: 100
