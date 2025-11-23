@@ -307,6 +307,7 @@ class Wham2D:
 
     def calc_free(self, prob: List[List[float]], use_mask: bool, mask: List[List[int]] | None) -> List[List[float]]:
         free = [[0.0 for _ in range(self.config.num_bins_y)] for _ in range(self.config.num_bins_x)]
+        epsilon = float(np.finfo(float).tiny)
         min_val = 1e50
         for i in range(self.config.num_bins_x):
             for j in range(self.config.num_bins_y):
@@ -314,7 +315,7 @@ class Wham2D:
                     prob[i][j] = 0.0
                     free[i][j] = MASKED
                 else:
-                    free[i][j] = -self.config.kT * math.log(prob[i][j])
+                    free[i][j] = -self.config.kT * math.log(max(prob[i][j], epsilon))
                     if free[i][j] < min_val:
                         min_val = free[i][j]
         for i in range(self.config.num_bins_x):
@@ -361,24 +362,31 @@ class Wham2D:
         num_lookup: np.ndarray,
     ) -> None:
         dtype = prob.dtype
+        finfo = np.finfo(dtype)
         mask_arr = np.asarray(mask, dtype=bool) if use_mask and mask is not None else None
         factors = np.asarray(
             hist_group.partitions if have_energy else [h.num_points for h in hist_group.histograms],
             dtype=dtype,
         )
         weight = np.asarray(hist_group.previous_free_energies, dtype=dtype) * factors
-        denom = np.tensordot(bias_lookup, weight, axes=([2], [0]))
-        tiny = np.finfo(dtype).tiny
+        with np.errstate(over="ignore"):
+            denom = np.tensordot(bias_lookup, weight, axes=([2], [0]))
+        tiny = finfo.tiny
         if mask_arr is not None:
             denom = np.where(mask_arr, denom, 1.0)
-        prob[:] = num_lookup / np.maximum(denom, tiny)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            safe_denom = np.maximum(denom, tiny)
+            prob[:] = num_lookup / safe_denom
+        prob[:] = np.nan_to_num(prob, nan=0.0, posinf=finfo.max, neginf=0.0)
+        prob[:] = np.minimum(prob, finfo.max)
         if mask_arr is not None:
             prob *= mask_arr
 
         bias_prob = prob[..., None] * bias_lookup
         bias_sum = bias_prob.sum(axis=(0, 1))
+        bias_sum = np.nan_to_num(bias_sum, nan=0.0, posinf=finfo.max, neginf=0.0)
         bias_sum = np.maximum(bias_sum, tiny)
-        updated = (1.0 / bias_sum).tolist()
+        updated = np.clip(1.0 / bias_sum, tiny, finfo.max).tolist()
         for idx, val in enumerate(updated):
             hist_group.free_energies[idx] = val
 
@@ -487,6 +495,9 @@ class Wham2D:
             self.wham_iteration(hist_group, prob, have_energy, self.config.use_mask, mask, bias_lookup, num_lookup)
             iteration += 1
 
+            epsilon = float(np.finfo(dtype).tiny)
+            hist_group.free_energies = [max(val, epsilon) for val in hist_group.free_energies]
+            hist_group.previous_free_energies = [max(val, epsilon) for val in hist_group.previous_free_energies]
             logged_current = [
                 hist_group.temperatures[i] * math.log(hist_group.free_energies[i]) for i in range(hist_group.num_windows)
             ]
@@ -815,6 +826,9 @@ def _run_bootstrap_trial(
         wham.wham_iteration(hist_group, prob, have_energy, use_mask, mask, bias_lookup, num_lookup)
         iteration += 1
 
+        epsilon = float(np.finfo(dtype).tiny)
+        hist_group.free_energies = [max(val, epsilon) for val in hist_group.free_energies]
+        hist_group.previous_free_energies = [max(val, epsilon) for val in hist_group.previous_free_energies]
         logged_current = [
             hist_group.temperatures[i] * math.log(hist_group.free_energies[i]) for i in range(hist_group.num_windows)
         ]
