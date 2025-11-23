@@ -67,6 +67,48 @@ Running these commands will emit trajectories, metadata, and reconstructed free
 energies under `examples/output_1D` and `examples/output_2d`, which can be fed
 back into the library for visualization or further analysis.
 
+## Visualization helpers
+
+The `pywham.visualization` submodule provides quick plotting utilities that
+consume the WHAM solver outputs.
+
+- **Automatic plotting from a freefile**: ``save_free_energy_plots`` detects the
+  1D vs 2D output format and writes PNGs next to the input file (or into a
+  custom directory). For example, after running the 1D example above you can do:
+
+  ```python
+  from pywham import save_free_energy_plots
+
+  outputs = save_free_energy_plots("examples/output_1D/output.free")
+  print(outputs["free_energy"])
+  ```
+
+  This function expects the standard WHAM freefile layout (five columns for 1D:
+  coordinate, free energy, uncertainty, probability, probability uncertainty;
+  four columns for 2D: x, y, free energy, probability) and raises
+  ``ValueError`` if the shape does not match the expected format.
+
+- **Direct plotting**: ``plot_free_energy_1d`` and ``plot_free_energy_2d`` take
+  coordinates and arrays directly and optionally save or show the figure:
+
+  ```python
+  import numpy as np
+  from pywham import plot_free_energy_1d, plot_free_energy_2d
+
+  # 1D profile with uncertainty band
+  x = np.linspace(-3.14, 3.14, 200)
+  free = np.loadtxt("examples/output_1D/output.free")[:, 1]
+  err = np.loadtxt("examples/output_1D/output.free")[:, 2]
+  plot_free_energy_1d(x, free, err, output_path="free_energy.png")
+
+  # 2D surface from a grid-shaped array
+  data = np.loadtxt("examples/output_2d/output-2d.free")
+  x_vals = np.unique(data[:, 0])
+  y_vals = np.unique(data[:, 1])
+  free_surface = data[:, 2].reshape(len(x_vals), len(y_vals))
+  plot_free_energy_2d(x_vals, y_vals, free_surface, output_path="free_energy_2d.png")
+  ```
+
 ### 2D configuration
 
 ```yaml
