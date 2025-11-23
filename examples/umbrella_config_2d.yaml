@@ -98,8 +98,8 @@ centers:
     - [1.1, 0.94]
     - [1.1, 1.23]
     - [1.1, 1.52]
-spring_constant_x: 25.0
-spring_constant_y: 25.0
+spring_constant_x: 100.0
+spring_constant_y: 100.0
 temperature: 1.0
 friction: 1.0
 time_step: 0.001
