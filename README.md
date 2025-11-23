@@ -49,6 +49,24 @@ Each non-comment, non-empty line in `metadata_file` should contain:
 
 Lines may start with `#` for comments. Mixing lines with and without temperature is rejected.
 
+## Example data generation
+
+Sample umbrella-sampling configuration files are included under `examples/`:
+
+```bash
+# 1D trajectories and WHAM reconstruction
+python examples/langevin_umbrella.py --config examples/umbrella_config_1d.yaml
+python -m pywham.wham1d examples/wham1d_config.yaml
+
+# 2D trajectories on the Müller-Brown surface and WHAM2D reconstruction
+python examples/langevin_umbrella_2d.py --config examples/umbrella_config_2d.yaml
+python -m pywham.wham2d examples/wham2d_config.yaml
+```
+
+Running these commands will emit trajectories, metadata, and reconstructed free
+energies under `examples/output_1D` and `examples/output_2d`, which can be fed
+back into the library for visualization or further analysis.
+
 ### 2D configuration
 
 ```yaml
