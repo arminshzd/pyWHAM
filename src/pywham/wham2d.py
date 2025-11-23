@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
+import numpy as np
 import yaml
 
 from .structures import HistGroup2D, Histogram2D
@@ -37,6 +38,8 @@ class Wham2DConfig:
     periodic_y: bool
     period_y: float
     k_B: float
+    use_float32: bool = False
+    bias_chunk_size: int | None = None
 
     @property
     def bin_width_x(self) -> float:
@@ -316,30 +319,85 @@ class Wham2D:
     def wham_iteration(
         self,
         hist_group: HistGroup2D,
-        prob: List[List[float]],
+        prob: np.ndarray,
         have_energy: bool,
         use_mask: bool,
         mask: List[List[int]] | None,
-        bias_lookup: List[List[List[float]]],
-        num_lookup: List[List[float]],
+        bias_lookup: np.ndarray,
+        num_lookup: np.ndarray,
     ) -> None:
-        for i in range(self.config.num_bins_x):
-            for k in range(self.config.num_bins_y):
-                if use_mask and mask is not None and not mask[i][k]:
-                    continue
-                denom = 0.0
-                for j in range(hist_group.num_windows):
-                    bf = hist_group.previous_free_energies[j] * bias_lookup[i][k][j]
-                    if have_energy:
-                        denom += hist_group.partitions[j] * bf
-                    else:
-                        denom += hist_group.histograms[j].num_points * bf
-                prob[i][k] = num_lookup[i][k] / denom
-                for j in range(hist_group.num_windows):
-                    bf = bias_lookup[i][k][j] * prob[i][k]
-                    hist_group.free_energies[j] += bf
-        for j in range(hist_group.num_windows):
-            hist_group.free_energies[j] = 1.0 / hist_group.free_energies[j]
+        dtype = prob.dtype
+        mask_arr = np.asarray(mask, dtype=bool) if use_mask and mask is not None else None
+        factors = np.asarray(
+            hist_group.partitions if have_energy else [h.num_points for h in hist_group.histograms],
+            dtype=dtype,
+        )
+        weight = np.asarray(hist_group.previous_free_energies, dtype=dtype) * factors
+        denom = np.tensordot(bias_lookup, weight, axes=([2], [0]))
+        tiny = np.finfo(dtype).tiny
+        if mask_arr is not None:
+            denom = np.where(mask_arr, denom, 1.0)
+        prob[:] = num_lookup / np.maximum(denom, tiny)
+        if mask_arr is not None:
+            prob *= mask_arr
+
+        bias_prob = prob[..., None] * bias_lookup
+        bias_sum = bias_prob.sum(axis=(0, 1))
+        bias_sum = np.maximum(bias_sum, tiny)
+        updated = (1.0 / bias_sum).tolist()
+        for idx, val in enumerate(updated):
+            hist_group.free_energies[idx] = val
+
+    def _coordinate_grids(self, dtype: np.dtype) -> Tuple[np.ndarray, np.ndarray]:
+        x_centers = self.config.hist_min_x + self.config.bin_width_x * (
+            np.arange(self.config.num_bins_x, dtype=dtype) + 0.5
+        )
+        y_centers = self.config.hist_min_y + self.config.bin_width_y * (
+            np.arange(self.config.num_bins_y, dtype=dtype) + 0.5
+        )
+        return np.meshgrid(x_centers, y_centers, indexing="ij")
+
+    def _build_bias_lookup(
+        self,
+        hist_group: HistGroup2D,
+        x_grid: np.ndarray,
+        y_grid: np.ndarray,
+        dtype: np.dtype,
+    ) -> np.ndarray:
+        num_windows = hist_group.num_windows
+        bias_lookup = np.empty(
+            (self.config.num_bins_x, self.config.num_bins_y, num_windows), dtype=dtype
+        )
+        bias_locations = np.asarray(hist_group.bias_locations, dtype=dtype)
+        spring_x = np.asarray(hist_group.spring_x, dtype=dtype)
+        spring_y = np.asarray(hist_group.spring_y, dtype=dtype)
+        temperatures = np.asarray(hist_group.temperatures, dtype=dtype)
+        chunk_size = self.config.bias_chunk_size or num_windows
+
+        for start in range(0, num_windows, chunk_size):
+            end = min(start + chunk_size, num_windows)
+            bx = bias_locations[start:end, 0][:, None, None]
+            by = bias_locations[start:end, 1][:, None, None]
+            dx = x_grid[None, :, :] - bx
+            dy = y_grid[None, :, :] - by
+
+            if self.config.periodic_x:
+                dx = np.abs(dx)
+                dx = np.where(dx > self.config.period_x / 2.0, dx - self.config.period_x, dx)
+            if self.config.periodic_y:
+                dy = np.abs(dy)
+                dy = np.where(dy > self.config.period_y / 2.0, dy - self.config.period_y, dy)
+
+            bias_energy = 0.5 * (
+                spring_x[start:end, None, None] * dx * dx
+                + spring_y[start:end, None, None] * dy * dy
+            )
+            bias_energy /= temperatures[start:end, None, None]
+            bias_lookup[:, :, start:end] = np.exp(-bias_energy.transpose(1, 2, 0)).astype(
+                dtype, copy=False
+            )
+
+        return bias_lookup
 
     def run(self) -> None:
         lines = self.config.metadata_path.read_text(encoding="utf-8").splitlines()
@@ -365,31 +423,26 @@ class Wham2D:
             hist_group.free_energies[i] = 1.0
             hist_group.previous_free_energies[i] = 1.0
 
-        num_lookup = [
-            [0.0 for _ in range(self.config.num_bins_y)] for _ in range(self.config.num_bins_x)
-        ]
-        bias_lookup = [
-            [[0.0 for _ in range(hist_group.num_windows)] for _ in range(self.config.num_bins_y)]
-            for _ in range(self.config.num_bins_x)
-        ]
+        dtype = np.float32 if self.config.use_float32 else np.float64
+        x_grid, y_grid = self._coordinate_grids(dtype)
 
-        for i in range(self.config.num_bins_x):
-            for k in range(self.config.num_bins_y):
-                coor = self.calc_coor(i, k)
-                num_lookup[i][k] = 0.0
-                for j in range(hist_group.num_windows):
-                    num_lookup[i][k] += self.get_histval(hist_group.histograms[j], i, k)
-                    bias_lookup[i][k][j] = math.exp(-self.calc_bias(hist_group, j, coor) / hist_group.temperatures[j])
+        num_lookup = np.zeros(
+            (self.config.num_bins_x, self.config.num_bins_y), dtype=dtype
+        )
+        for hist in hist_group.histograms:
+            if hist.num_points == 0:
+                continue
+            x_slice = slice(hist.first_x, hist.last_x + 1)
+            y_slice = slice(hist.first_y, hist.last_y + 1)
+            num_lookup[x_slice, y_slice] += np.asarray(hist.data, dtype=dtype)
 
-        prob = [
-            [0.0 for _ in range(self.config.num_bins_y)] for _ in range(self.config.num_bins_x)
-        ]
-        final_prob = [
-            [0.0 for _ in range(self.config.num_bins_y)] for _ in range(self.config.num_bins_x)
-        ]
-        free_ene = [
-            [0.0 for _ in range(self.config.num_bins_y)] for _ in range(self.config.num_bins_x)
-        ]
+        bias_lookup = self._build_bias_lookup(hist_group, x_grid, y_grid, dtype)
+
+        prob = np.zeros(
+            (self.config.num_bins_x, self.config.num_bins_y), dtype=dtype
+        )
+        final_prob = np.zeros_like(prob)
+        free_ene = np.zeros_like(prob)
 
         iteration = 0
         first = True
@@ -430,11 +483,10 @@ class Wham2D:
             print(f"# {j}\t{hist_group.free_energies[j] - hist_group.free_energies[0]}")
 
         free_ene = self.calc_free(prob, self.config.use_mask, mask)
-        total = sum(sum(row) for row in prob)
-        for i in range(self.config.num_bins_x):
-            for j in range(self.config.num_bins_y):
-                prob[i][j] /= total
-                final_prob[i][j] = prob[i][j]
+        total = float(np.sum(prob))
+        if total > 0:
+            prob /= total
+        final_prob[:] = prob
 
         if self.config.use_mask and mask is not None:
             for i in range(self.config.num_bins_x):
@@ -579,6 +631,8 @@ def build_config(yaml_path: Path) -> Wham2DConfig:
         periodic_y=periodic_y,
         period_y=period_y,
         k_B=k_B,
+        use_float32=bool(config.get("use_float32", False)),
+        bias_chunk_size=(int(config["bias_chunk_size"]) if "bias_chunk_size" in config else None),
     )
 
 
