@@ -15,6 +15,7 @@ Configurable parameters (YAML)
 * `time_step`: integrator time step
 * `steps`: total simulation steps
 * `stride`: output stride for saved frames
+* `sub_steps`: number of Euler–Maruyama sub-steps per saved integration step
 * `correlation_time`: correlation time reported to WHAM
 * `output_dir`: directory for trajectory and metadata files
 * `metadata_name`: output metadata filename
@@ -40,6 +41,7 @@ friction: 1.0
 time_step: 0.001
 steps: 200000
 stride: 100
+sub_steps: 10
 correlation_time: 10.0
 output_dir: examples/output
 metadata_name: umbrella_metadata.txt
@@ -106,25 +108,35 @@ def langevin_integrator(
     steps: int,
     stride: int,
     random_state: np.random.Generator,
+    sub_steps: int = 10,
 ) -> List[Tuple[int, float, float]]:
     """Run overdamped Langevin dynamics with an umbrella restraint.
 
     The update follows the overdamped equation dx = (F/γ) dt + sqrt(2 k_B T / γ)
     dW and clips positions to [-1, 1] each step to keep the stiff test potential
-    numerically stable.
+    numerically stable.  The integration step is internally split into
+    ``sub_steps`` smaller Euler–Maruyama updates (dt = time_step / sub_steps) to
+    reduce discretization bias for the narrow wells in the test potential.
     """
 
     x = float(x0)
+    if sub_steps <= 0:
+        raise ValueError("sub_steps must be a positive integer")
+
+    dt = time_step / float(sub_steps)
     diffusion = (2.0 * k_B * temperature) / friction
-    noise_scale = np.sqrt(diffusion * time_step)
+    noise_scale = np.sqrt(diffusion * dt)
 
     records: List[Tuple[int, float, float]] = []
     for step in range(steps):
-        total_force = potential_force(x) + umbrella_force(x, center, spring_constant)
-        deterministic = (total_force / friction) * time_step
-        stochastic = noise_scale * random_state.normal()
-        x += deterministic + stochastic
-        x = float(np.clip(x, -1.0, 1.0))
+        for _ in range(sub_steps):
+            total_force = potential_force(x) + umbrella_force(
+                x, center, spring_constant
+            )
+            deterministic = (total_force / friction) * dt
+            stochastic = noise_scale * random_state.normal()
+            x += deterministic + stochastic
+            x = float(np.clip(x, -1.0, 1.0))
 
         if step % stride == 0:
             bias_energy = umbrella_energy(x, center, spring_constant)
@@ -183,6 +195,7 @@ def parse_config() -> dict:
         "time_step": 0.001,
         "steps": 200000,
         "stride": 100,
+        "sub_steps": 10,
         "correlation_time": 10.0,
         "output_dir": "examples/output",
         "metadata_name": "umbrella_metadata.txt",
@@ -192,6 +205,7 @@ def parse_config() -> dict:
     merged = {**defaults, **config}
     merged["output_dir"] = Path(merged["output_dir"])
     merged["centers"] = list(merged.get("centers", []))
+    merged["sub_steps"] = int(merged.get("sub_steps", 1))
     merged["metadata_name"] = str(merged["metadata_name"])
     return merged
 
@@ -217,6 +231,7 @@ def main() -> None:
                 steps=cfg["steps"],
                 stride=cfg["stride"],
                 random_state=rng,
+                sub_steps=cfg["sub_steps"],
             )
             save_trajectory(traj_path, trajectory)
             write_metadata_line(
