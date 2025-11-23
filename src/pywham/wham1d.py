@@ -229,17 +229,14 @@ class Wham1D:
             hist_group.free_energies[i] = 0.0
 
     def is_converged(self, hist_group: HistGroup1D) -> bool:
-        for i in range(hist_group.num_windows):
-            error = abs(hist_group.free_energies[i] - hist_group.previous_free_energies[i])
-            if error > self.config.tolerance:
-                return False
-        return True
+        current = np.asarray(hist_group.free_energies, dtype=float)
+        previous = np.asarray(hist_group.previous_free_energies, dtype=float)
+        return bool(np.all(np.abs(current - previous) <= self.config.tolerance))
 
     def average_diff(self, hist_group: HistGroup1D) -> float:
-        error = 0.0
-        for i in range(hist_group.num_windows):
-            error += abs(hist_group.free_energies[i] - hist_group.previous_free_energies[i])
-        return error / float(hist_group.num_windows)
+        current = np.asarray(hist_group.free_energies, dtype=float)
+        previous = np.asarray(hist_group.previous_free_energies, dtype=float)
+        return float(np.mean(np.abs(current - previous)))
 
     def calc_free(self, probabilities: List[float]) -> Tuple[List[float], int]:
         free = [-self.config.kT * math.log(p) for p in probabilities]
@@ -249,28 +246,44 @@ class Wham1D:
         return adjusted, bin_min
 
     def wham_iteration(self, hist_group: HistGroup1D, prob: List[float], have_energy: bool) -> None:
-        for i in range(self.config.num_bins):
-            coor = self.calc_coor(i)
-            num = 0.0
-            denom = 0.0
-            for j in range(hist_group.num_windows):
-                num += self.get_histval(hist_group.histograms[j], i)
-                bias = self.calc_bias(hist_group, j, coor)
-                bf = math.exp((hist_group.previous_free_energies[j] - bias) / hist_group.temperatures[j])
-                if have_energy:
-                    denom += hist_group.partitions[j] * bf
-                else:
-                    denom += hist_group.histograms[j].num_points * bf
-            prob[i] = num / denom
-            for j in range(hist_group.num_windows):
-                bias = self.calc_bias(hist_group, j, coor)
-                bf = math.exp(-bias / hist_group.temperatures[j]) * prob[i]
-                hist_group.free_energies[j] += bf
+        num_windows = hist_group.num_windows
+        num_bins = self.config.num_bins
 
-        for j in range(hist_group.num_windows):
-            hist_group.free_energies[j] = -hist_group.temperatures[j] * math.log(hist_group.free_energies[j])
-        for j in range(hist_group.num_windows - 1, -1, -1):
-            hist_group.free_energies[j] -= hist_group.free_energies[0]
+        probabilities = np.asarray(prob, dtype=float)
+        bias_locations = np.asarray(hist_group.bias_locations, dtype=float)
+        spring_constants = np.asarray(hist_group.spring_constants, dtype=float)
+        previous_free_energies = np.asarray(hist_group.previous_free_energies, dtype=float)
+        temperatures = np.asarray(hist_group.temperatures, dtype=float)
+        partitions = np.asarray(hist_group.partitions, dtype=float)
+        num_points = np.array([hist_group.histograms[i].num_points for i in range(num_windows)], dtype=float)
+
+        coordinates = self.config.hist_min + self.config.bin_width * (np.arange(num_bins) + 0.5)
+        dx = coordinates[None, :] - bias_locations[:, None]
+        if self.config.periodic:
+            dx = np.abs(dx)
+            dx = np.where(dx > self.config.period / 2.0, dx - self.config.period, dx)
+        bias_lookup = 0.5 * spring_constants[:, None] * dx * dx
+
+        hist_matrix = np.zeros((num_windows, num_bins), dtype=float)
+        for window_index, hist in enumerate(hist_group.histograms):
+            if hist.first <= hist.last:
+                start = hist.first
+                end = hist.last + 1
+                hist_matrix[window_index, start:end] = hist.data
+
+        numerator = hist_matrix.sum(axis=0)
+        bias_factor = np.exp((previous_free_energies[:, None] - bias_lookup) / temperatures[:, None])
+        denom_weights = partitions if have_energy else num_points
+        denom = (denom_weights[:, None] * bias_factor).sum(axis=0)
+        probabilities = np.divide(numerator, denom, out=np.zeros_like(numerator), where=denom != 0.0)
+
+        free_energy_terms = np.exp(-bias_lookup / temperatures[:, None]) * probabilities
+        free_energies = free_energy_terms.sum(axis=1)
+        free_energies = -temperatures * np.log(free_energies)
+        free_energies = free_energies - free_energies[0]
+
+        prob[:] = probabilities.tolist()
+        hist_group.free_energies = free_energies.tolist()
 
     def run(self) -> None:
         lines = self.config.metadata_path.read_text(encoding="utf-8").splitlines()
