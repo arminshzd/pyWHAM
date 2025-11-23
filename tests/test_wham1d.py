@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
 from pywham.wham1d import (
     DEGREES,
@@ -220,40 +221,63 @@ def test_mk_new_hist_and_random_bin(base_config: Wham1DConfig) -> None:
 
 
 def test_parse_units_and_periodic_and_build_config(tmp_path: Path) -> None:
-    k_B, remaining = parse_units(["units", "real", "extra"])
-    assert k_B != 0.0
-    assert remaining == ["extra"]
-    periodic, period, consumed = parse_periodic("Ppi")
-    assert periodic and period == pytest.approx(RADIANS) and consumed == 1
-    periodic, period, consumed = parse_periodic("P180")
-    assert periodic and period == pytest.approx(180.0)
-    args = [
-        "units",
-        "real",
-        "P",
-        "0",
-        "1",
-        "10",
-        "0.1",
-        "300",
-        "0",
-        str(tmp_path / "meta"),
-        str(tmp_path / "free"),
-        "2",
-        "5",
-    ]
-    config = build_config(args)
+    assert parse_units("real") == pytest.approx(0.0019872067)
+
+    periodic, period = parse_periodic({"periodic": True, "period": "pi"})
+    assert periodic is True
+    assert period == pytest.approx(RADIANS)
+
+    meta, _ = _prepare_metadata_files(tmp_path)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "hist_min": 0.0,
+                "hist_max": 2.0,
+                "num_bins": 2,
+                "tolerance": 1e-6,
+                "temperature": 300.0,
+                "numpad": 0,
+                "metadata_file": str(meta),
+                "freefile": str(tmp_path / "free"),
+                "units": "real",
+                "periodic": True,
+                "period": "pi",
+                "num_mc_runs": 2,
+                "mc_seed": 5,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = build_config(config_path)
     assert config.periodic is True
-    assert config.period == pytest.approx(DEGREES)
+    assert config.period == pytest.approx(RADIANS)
     assert config.num_mc_runs == 2
     assert config.mc_seed == -5
 
 
 def test_main_executes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     meta, _ = _prepare_metadata_files(tmp_path)
-    args = ["0", "2", "2", "0.1", "300", "0", str(meta), str(tmp_path / "free.txt")]
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "hist_min": 0.0,
+                "hist_max": 2.0,
+                "num_bins": 2,
+                "tolerance": 1e-6,
+                "temperature": 300.0,
+                "numpad": 0,
+                "metadata_file": str(meta),
+                "freefile": str(tmp_path / "free.txt"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
     monkeypatch.setenv("PYTHONHASHSEED", "0")
-    main(args)
+    main([str(config_path)])
     output = capsys.readouterr().out
     assert "#Number of windows = 1" in output
     assert (tmp_path / "free.txt").exists()

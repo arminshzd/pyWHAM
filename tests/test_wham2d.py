@@ -2,10 +2,12 @@ import math
 from pathlib import Path
 
 import pytest
+import yaml
 
 from pywham.wham2d import (
     DEGREES,
     MASKED,
+    RADIANS,
     Wham2D,
     Wham2DConfig,
     build_config,
@@ -273,17 +275,18 @@ def test_run_writes_freefile(tmp_path: Path) -> None:
 
 
 def test_parse_periodic_and_units() -> None:
-    assert parse_periodic("Px") == (True, DEGREES)
-    assert parse_periodic("Py=0") == (False, 0.0)
-    assert parse_periodic("Px=3.14") == (True, pytest.approx(3.14))
-    with pytest.raises(ValueError):
-        parse_periodic("Qx")
+    config = {"periodic_x": True, "periodic_y": False, "period_x": "pi", "period_y": 0.0}
+    periodic_x, period_x = parse_periodic(config, "x")
+    periodic_y, period_y = parse_periodic(config, "y")
 
-    k_B, remaining = parse_units(["units", "real", "Px"])
-    assert pytest.approx(k_B) == 0.0019872067
-    assert remaining == ["Px"]
+    assert periodic_x is True
+    assert period_x == pytest.approx(RADIANS)
+    assert periodic_y is False
+    assert period_y == 0.0
+
+    assert pytest.approx(parse_units("real")) == 0.0019872067
     with pytest.raises(ValueError):
-        parse_units(["units"])
+        parse_units("units")
 
 
 def test_build_config_and_main(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -291,31 +294,39 @@ def test_build_config_and_main(tmp_path: Path, capsys: pytest.CaptureFixture[str
     data_file.write_text("0 0.5 0.5 0.0\n")
     metadata_file = tmp_path / "metadata.txt"
     metadata_file.write_text(f"{data_file} 0.5 0.5 1.0 1.0 1.0 1.0\n")
-    args = [
-        "Px",
-        "0.0",
-        "1.0",
-        "1",
-        "Py",
-        "0.0",
-        "1.0",
-        "1",
-        "0.01",
-        "1.0",
-        "0",
-        str(metadata_file),
-        str(tmp_path / "free.txt"),
-        "0",
-    ]
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "hist_min_x": 0.0,
+                "hist_max_x": 1.0,
+                "num_bins_x": 1,
+                "hist_min_y": 0.0,
+                "hist_max_y": 1.0,
+                "num_bins_y": 1,
+                "tolerance": 0.01,
+                "temperature": 1.0,
+                "numpad": 0,
+                "metadata_file": str(metadata_file),
+                "freefile": str(tmp_path / "free.txt"),
+                "use_mask": False,
+                "periodic_x": True,
+                "period_x": 0.0,
+                "periodic_y": True,
+                "period_y": 0.0,
+            }
+        ),
+        encoding="utf-8",
+    )
 
-    config = build_config(args)
+    config = build_config(config_path)
     assert config.periodic_x and config.periodic_y
     assert config.num_bins_x == 1
     assert config.hist_min_x == 0.0
 
-    main(args)
+    main([str(config_path)])
     captured = capsys.readouterr()
-    assert "#Px" in captured.out
+    assert "#Number of windows = 1" in captured.out
     assert (tmp_path / "free.txt").exists()
 
 
