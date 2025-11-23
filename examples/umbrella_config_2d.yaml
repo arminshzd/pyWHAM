@@ -98,8 +98,6 @@ centers:
     - [1.1, 0.94]
     - [1.1, 1.23]
     - [1.1, 1.52]
-    - [1.1, 1.81]
-    - [1.1, 2.1]
 spring_constant_x: 25.0
 spring_constant_y: 25.0
 temperature: 1.0

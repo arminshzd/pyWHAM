@@ -5,5 +5,5 @@ friction: 1.0
 time_step: 0.001
 steps: 200000
 stride: 100
-output_dir: output_1D
+output_dir: output_1d
 metadata_name: umbrella_metadata.txt
