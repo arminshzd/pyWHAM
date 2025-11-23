@@ -577,6 +577,7 @@ class Wham2D:
             ave_prob2 = np.zeros_like(final_prob)
             ave_free = np.zeros_like(final_prob)
             ave_free2 = np.zeros_like(final_prob)
+            free_counts = np.zeros_like(final_prob, dtype=np.int32)
             ave_window = np.zeros(hist_group.num_windows, dtype=final_prob.dtype)
             ave_window2 = np.zeros(hist_group.num_windows, dtype=final_prob.dtype)
 
@@ -588,8 +589,10 @@ class Wham2D:
 
                 ave_prob += probabilities
                 ave_prob2 += probabilities * probabilities
-                ave_free += free_surface
-                ave_free2 += free_surface * free_surface
+                free_mask = np.isfinite(free_surface)
+                ave_free += np.where(free_mask, free_surface, 0)
+                ave_free2 += np.where(free_mask, free_surface * free_surface, 0)
+                free_counts += free_mask.astype(np.int32)
                 ave_window += free_biases
                 ave_window2 += free_biases * free_biases
 
@@ -598,8 +601,9 @@ class Wham2D:
             ave_prob2 /= count
             prob_std = np.sqrt(np.maximum(ave_prob2 - ave_prob * ave_prob, 0.0))
 
-            ave_free /= count
-            ave_free2 /= count
+            valid_counts = np.maximum(free_counts, 1)
+            ave_free = ave_free / valid_counts
+            ave_free2 = ave_free2 / valid_counts
             free_std = np.sqrt(np.maximum(ave_free2 - ave_free * ave_free, 0.0))
 
             ave_window /= count
