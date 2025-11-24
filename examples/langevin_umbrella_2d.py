@@ -13,13 +13,20 @@ Configurable parameters (YAML)
 * `spring_constant_y`: harmonic spring constant along Y
 * `temperature`: thermodynamic temperature (k_B = 1)
 * `friction`: friction coefficient
-* `time_step`: integrator time step
+* `time_step`: integrator time step (must satisfy the stability rule below)
 * `steps`: total simulation steps
 * `stride`: output stride for saved frames
 * `correlation_time`: correlation time reported to WHAM2D
 * `output_dir`: directory for trajectory and metadata files
 * `metadata_name`: output metadata filename
 * `seed`: RNG seed
+
+Stability rule
+--------------
+For the overdamped Langevin scheme used here, the umbrella stiffness limits the
+stable time step. The default guard enforces ``time_step <= 0.5 * friction /
+(spring_constant_x + spring_constant_y)``. Increase friction or reduce spring
+constants (or the time step) to satisfy this criterion before running.
 
 Example usage
 -------------
@@ -59,6 +66,24 @@ import numpy as np
 import yaml
 
 k_B = 1.0
+
+
+def max_stable_time_step(
+    spring_constant_x: float, spring_constant_y: float, friction: float, safety_factor: float = 0.5
+) -> float:
+    """Return a conservative stable time step for the overdamped umbrella dynamics.
+
+    The heuristic guard assumes the combined umbrella stiffness dominates the
+    fastest mode, yielding ``dt_max = safety_factor * friction / (k_x + k_y)``.
+    A safety factor of 0.5 is used by default to provide additional margin.
+    """
+
+    if spring_constant_x <= 0 or spring_constant_y <= 0:
+        raise ValueError("Umbrella spring constants must be positive to compute a stability limit.")
+    if friction <= 0:
+        raise ValueError("Friction must be positive to compute a stability limit.")
+
+    return safety_factor * friction / (spring_constant_x + spring_constant_y)
 
 
 def potential(x: float, y: float) -> float:
@@ -137,6 +162,14 @@ def langevin_integrator(
     The update follows the overdamped equation ``dx = (F/γ) dt + \sqrt{2 k_B T / γ} dW``
     with independent noise in each dimension.
     """
+
+    dt_max = max_stable_time_step(spring_constant_x, spring_constant_y, friction)
+    if time_step > dt_max:
+        raise ValueError(
+            "time_step exceeds the stability limit for the configured umbrellas: "
+            f"{time_step} > {dt_max:.6g}. "
+            "Decrease time_step, increase friction, or reduce spring constants."
+        )
 
     x = float(x0)
     y = float(y0)
@@ -230,6 +263,17 @@ def parse_config() -> dict:
     merged["output_dir"] = Path(merged["output_dir"])
     merged["centers"] = [list(pair) for pair in merged.get("centers", [])]
     merged["metadata_name"] = str(merged.get("metadata_name", defaults["metadata_name"]))
+
+    dt_max = max_stable_time_step(
+        merged["spring_constant_x"], merged["spring_constant_y"], merged["friction"]
+    )
+    if merged["time_step"] > dt_max:
+        raise ValueError(
+            "Configured time_step exceeds the stability guard: "
+            f"{merged['time_step']} > {dt_max:.6g}. "
+            "Reduce time_step, increase friction, or decrease umbrella spring constants."
+        )
+
     return merged
 
 
