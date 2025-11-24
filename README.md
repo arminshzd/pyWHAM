@@ -31,7 +31,11 @@ mc_seed: -12345
 Run the solver with:
 
 ```bash
-wham wham-config.yml
+python -m pywham.wham1d wham-config.yml
+```
+or
+```bash
+python -m pywham.wham2d wham-config.yml
 ```
 
 #### 1D metadata file
@@ -72,7 +76,7 @@ back into the library for visualization or further analysis.
 ## Visualization helpers
 
 The `pywham.visualization` submodule provides quick plotting utilities that
-consume the WHAM solver outputs.
+uses the WHAM solver outputs.
 
 - **Automatic plotting from a freefile**: ``save_free_energy_plots`` detects the
   1D vs 2D output format and writes PNGs next to the input file (or into a
@@ -137,7 +141,7 @@ period_y: 0
 Run the solver with:
 
 ```bash
-wham-2d wham2d-config.yml
+python -m pywham.wham2d wham2d-config.yml
 ```
 
 #### 2D metadata file
