@@ -67,11 +67,22 @@ class Wham2D:
         self.histogram: List[List[float]] = [
             [0.0 for _ in range(config.num_bins_y)] for _ in range(config.num_bins_x)
         ]
+        self._low_weight_warnings: set[int] = set()
 
     def clear_histogram(self) -> None:
         for i in range(self.config.num_bins_x):
             for j in range(self.config.num_bins_y):
                 self.histogram[i][j] = 0.0
+
+    def _warn_low_weight_window(self, index: int, issue: str) -> None:
+        if index in self._low_weight_warnings:
+            return
+        print(
+            "# Warning: Window"
+            f" {index} {issue}; consider removing it from the metadata"
+            " or rerunning with a softer spring."
+        )
+        self._low_weight_warnings.add(index)
 
     def calc_coor(self, i: int, j: int) -> Tuple[float, float]:
         return (
@@ -369,9 +380,13 @@ class Wham2D:
             dtype=dtype,
         )
         weight = np.asarray(hist_group.previous_free_energies, dtype=dtype) * factors
+        tiny = finfo.tiny
+        for idx, (factor, w_val) in enumerate(zip(factors, weight)):
+            if factor <= tiny or w_val <= tiny:
+                issue = "has near-zero counts/partition" if factor <= tiny else "has near-zero weight"
+                self._warn_low_weight_window(idx, issue)
         with np.errstate(over="ignore"):
             denom = np.tensordot(bias_lookup, weight, axes=([2], [0]))
-        tiny = finfo.tiny
         if mask_arr is not None:
             denom = np.where(mask_arr, denom, 1.0)
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
