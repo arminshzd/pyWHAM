@@ -550,8 +550,16 @@ def _build_histogram(
             trimmed.cumulative[i - min_nonzero] = trimmed.cumulative[i - min_nonzero - 1] + histogram[i - 1]
 
     total = trimmed.cumulative[num_used] + histogram[max_nonzero]
+    tiny = float(np.finfo(float).tiny)
+    if total <= tiny:
+        warnings.append(
+            "# Warning: Window"
+            f" {source} has near-zero counts/partition; consider removing it from the metadata"
+            " or rerunning with a softer spring."
+        )
+    safe_total = max(total, tiny)
     for i in range(num_used + 1):
-        trimmed.cumulative[i] /= total
+        trimmed.cumulative[i] /= safe_total
 
     return trimmed, total, warnings
 
