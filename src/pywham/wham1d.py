@@ -263,6 +263,19 @@ class Wham1D:
         previous = np.asarray(hist_group.previous_free_energies, dtype=float)
         return float(np.mean(np.abs(current - previous)))
 
+    def _write_iteration_snapshot(
+        self, iteration: int, free_energy: list[float], probabilities: list[float], free_energies: list[float]
+    ) -> None:
+        with self.config.freefile_path.open("w", encoding="utf-8") as freefile:
+            freefile.write(f"# Iteration {iteration}\n")
+            freefile.write("#Coor\tFree\tProb\n")
+            for i in range(self.config.num_bins):
+                coor = self.calc_coor(i)
+                freefile.write(f"{coor:.6f}\t{free_energy[i]:.6f}\t{probabilities[i]:.6e}\n")
+            freefile.write("\n# Window\tFree (free energy units)\n")
+            for idx, value in enumerate(free_energies):
+                freefile.write(f"#{idx}\t{value:.6f}\n")
+
 
     def calc_free(self, probabilities: List[float]) -> Tuple[List[float], int]:
         free = [-self.config.kT * math.log(p) for p in probabilities]
@@ -348,26 +361,17 @@ class Wham1D:
             iteration += 1
             if iteration % 10 == 0:
                 error = self.average_diff(hist_group)
-                print(f"#Iteration {iteration}:  {error}")
+                print(f"# Iteration {iteration:8d} | error {error:12.6e}")
             if iteration % 100 == 0:
                 free_energy, _ = self.calc_free(probabilities)
-                for i in range(self.config.num_bins):
-                    coor = self.calc_coor(i)
-                    print(f"{coor}\t{free_energy[i]}\t{probabilities[i]}")
-                print()
-                print("# Dumping simulation biases, in the metadata file order ")
-                print("# Window  F (free energy units)")
+                self._write_iteration_snapshot(iteration, free_energy, probabilities, hist_group.free_energies)
                 for j in range(hist_group.num_windows):
-                    print(f"# {j}\t{hist_group.free_energies[j]}")
                     final_f[j] = hist_group.free_energies[j]
             if iteration >= 100000:
                 print(f"Too many iterations: {iteration}")
                 break
 
-        print("# Dumping simulation biases, in the metadata file order ")
-        print("# Window  F (free energy units)")
         for j in range(hist_group.num_windows):
-            print(f"# {j}\t{hist_group.free_energies[j]}")
             final_f[j] = hist_group.free_energies[j]
 
         total = sum(probabilities)
