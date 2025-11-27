@@ -138,6 +138,8 @@ periodic_y: false
 period_y: 0
 ```
 
+Required keys mirror the arguments consumed by `build_config`: histogram bounds and bin counts for each axis (`hist_min_x`, `hist_max_x`, `num_bins_x`, `hist_min_y`, `hist_max_y`, `num_bins_y`), solver controls (`tolerance`, `temperature`, and `numpad` padding), file paths for input/output (`metadata_file`, `freefile`), and the boolean `use_mask`. Optional keys include energy-unit conversion (`units`), per-axis periodicity toggles and periods (`periodic_x`/`period_x`, `periodic_y`/`period_y`), memory/precision controls (`use_float32`, `bias_chunk_size`), bootstrap settings (`num_mc_runs`, `mc_seed`, `mc_workers`), and an optional error output `freefile_error` for window-level bootstrap uncertainties. When `use_mask` is true, bins not visited in the histogram are masked so they do not participate in normalization or smoothing; leave it false to treat unvisited bins as zero-probability padding. Enabling `use_float32` and/or a positive `bias_chunk_size` can significantly reduce memory footprint (and potentially speed up I/O-bound runs) at the cost of floating-point precision or small overhead per chunk; disable them to favor accuracy. Bootstrap outputs are appended as extra free-energy/probability columns in `freefile`, and if `freefile_error` is set a separate file listing per-window errors is written after the main surface output.
+
 Run the solver with:
 
 ```bash
