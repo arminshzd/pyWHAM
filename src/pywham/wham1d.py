@@ -278,10 +278,23 @@ class Wham1D:
 
 
     def calc_free(self, probabilities: List[float]) -> Tuple[List[float], int]:
-        free = [-self.config.kT * math.log(p) for p in probabilities]
-        min_val = min(free)
-        bin_min = free.index(min_val)
-        adjusted = [f - min_val for f in free]
+        epsilon = float(np.finfo(float).tiny)
+
+        free: list[float] = []
+        for probability in probabilities:
+            if probability <= 0.0:
+                free.append(math.inf)
+            else:
+                clamped_prob = max(probability, epsilon)
+                free.append(-self.config.kT * math.log(clamped_prob))
+
+        finite_indices = [idx for idx, value in enumerate(free) if math.isfinite(value)]
+        if not finite_indices:
+            raise ValueError("No positive probabilities provided")
+
+        bin_min = min(finite_indices, key=free.__getitem__)
+        min_val = free[bin_min]
+        adjusted = [(f - min_val) if math.isfinite(f) else math.inf for f in free]
         return adjusted, bin_min
 
     def wham_iteration(self, hist_group: HistGroup1D, prob: List[float], have_energy: bool) -> None:
