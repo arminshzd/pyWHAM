@@ -28,6 +28,22 @@ num_mc_runs: 0
 mc_seed: -12345
 ```
 
+Key reference for the 1D configuration:
+
+- `hist_min` / `hist_max` (required): Lower/upper coordinate bounds for the histogram axis; values outside this range are ignored. Units match the raw data.
+- `num_bins` (required): Number of bins spanning `[hist_min, hist_max]`; sets the bin width used throughout the WHAM iteration.
+- `tolerance` (required): Convergence cutoff applied to window free energies; iteration stops when the absolute per-window change is below this value.
+- `temperature` (required): Simulation temperature used with Boltzmann constant `k_B` (see `units`) to form `kT` for weighting energies.
+- `numpad` (required): Number of bins to duplicate from each edge when writing the output `.free` file; use `0` to omit padding or a positive integer to wrap edge values for easier periodic plotting.
+- `metadata_file` (required): Path to the window metadata file.
+- `freefile` (required): Destination path for the WHAM output (probabilities, free energies, and optional uncertainties).
+- `units` (optional, default uses `k_B = 0.0019829237`): Selects a preset Boltzmann constant (e.g., `real`, `lj`, `metal`, `si`, `cgs`, `electron`, `micro`, `nano`, `default`).
+- `periodic` / `period` (optional): Enable periodic coordinates with `periodic: true`; omit or set `periodic: false` for non-periodic systems. When enabled, `period` defaults to `360.0` (degrees). Supplying `period: pi` switches to a `2π` radian period, and numeric values are accepted for custom periods.
+- `num_mc_runs` (optional, default `0`): Number of bootstrap trials. Values greater than zero trigger resampling to estimate uncertainties; the `+/-` columns in the `.free` file then report standard deviations of probability and free energy across trials. With `0`, bootstrap is skipped and uncertainty columns remain zero.
+- `mc_seed` (optional): Seed for bootstrap resampling; positive seeds are negated internally to mirror the original WHAM behavior. If omitted, a deterministic base seed of `1` is used.
+- `mc_workers` (optional): Limits parallel bootstrap workers. When unset, the solver uses the CPU count (capped at `num_mc_runs`); values below `1` are coerced to `1`.
+- `ingest_workers` (optional): Controls parallel ingestion of window files. Defaults to the CPU count (also honoring the `PYWHAM_DISABLE_PARALLEL` and `PYWHAM_INGEST_WORKERS` environment variables); values below `1` are coerced to `1`.
+
 Run the solver with:
 
 ```bash
