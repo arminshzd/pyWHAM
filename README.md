@@ -154,7 +154,22 @@ periodic_y: false
 period_y: 0
 ```
 
-Required keys mirror the arguments consumed by `build_config`: histogram bounds and bin counts for each axis (`hist_min_x`, `hist_max_x`, `num_bins_x`, `hist_min_y`, `hist_max_y`, `num_bins_y`), solver controls (`tolerance`, `temperature`, and `numpad` padding), file paths for input/output (`metadata_file`, `freefile`), and the boolean `use_mask`. Optional keys include energy-unit conversion (`units`), per-axis periodicity toggles and periods (`periodic_x`/`period_x`, `periodic_y`/`period_y`), memory/precision controls (`use_float32`, `bias_chunk_size`), bootstrap settings (`num_mc_runs`, `mc_seed`, `mc_workers`), and an optional error output `freefile_error` for window-level bootstrap uncertainties. When `use_mask` is true, bins not visited in the histogram are masked so they do not participate in normalization or smoothing; leave it false to treat unvisited bins as zero-probability padding. Enabling `use_float32` and/or a positive `bias_chunk_size` can significantly reduce memory footprint (and potentially speed up I/O-bound runs) at the cost of floating-point precision or small overhead per chunk; disable them to favor accuracy. Bootstrap outputs are appended as extra free-energy/probability columns in `freefile`, and if `freefile_error` is set a separate file listing per-window errors is written after the main surface output.
+- `hist_min_x` / `hist_max_x` / `hist_min_y` / `hist_max_y` (required): Lower/upper coordinate bounds for the X and Y axes; values outside these ranges are ignored. Units match the raw data.
+- `num_bins_x` / `num_bins_y` (required): Number of bins spanning `[hist_min_x, hist_max_x]` and `[hist_min_y, hist_max_y]`; sets the bin widths used throughout the WHAM iteration.
+- `tolerance` (required): Convergence cutoff applied to window free energies; iteration stops when the absolute per-window change is below this value.
+- `temperature` (required): Simulation temperature used with Boltzmann constant `k_B` (see `units`) to form `kT` for weighting energies.
+- `numpad` (required): Number of bins to duplicate from each edge when writing the output `.free` file; use `0` to omit padding or a positive integer to wrap edge values for easier periodic plotting.
+- `metadata_file` (required): Path to the window metadata file.
+- `freefile` (required): Destination path for the WHAM output (probabilities, free energies, and optional uncertainties).
+- `use_mask` (required): When `true`, bins not visited in the histogram are masked so they do not participate in normalization or smoothing; when `false`, unvisited bins are treated as zero-probability padding.
+- `units` (optional, default uses `k_B = 0.0019829237`): Selects a preset Boltzmann constant (e.g., `real`, `lj`, `metal`, `si`, `cgs`, `electron`, `micro`, `nano`, `default`).
+- `periodic_x` / `periodic_y` and `period_x` / `period_y` (optional): Enable periodic coordinates along each axis with `periodic_*: true`; omit or set `periodic_*: false` for non-periodic systems. When enabled, the period defaults to `360.0` (degrees). Supplying `period_*: pi` switches to a `2π` radian period, and numeric values are accepted for custom periods.
+- `use_float32` (optional, default `false`): Store histogram and WHAM arrays in single precision to reduce memory footprint at the cost of floating-point precision.
+- `bias_chunk_size` (optional): If set to a positive integer, computes bias matrices in chunks to reduce peak memory usage; leave unset to process in a single pass.
+- `num_mc_runs` (optional, default `0`): Number of bootstrap trials. Values greater than zero trigger resampling to estimate uncertainties; the `+/-` columns in the `.free` file then report standard deviations of probability and free energy across trials. With `0`, bootstrap is skipped and uncertainty columns remain zero.
+- `mc_seed` (optional): Seed for bootstrap resampling; if omitted, a deterministic base seed of `1` is used.
+- `mc_workers` (optional): Limits parallel bootstrap workers. When unset, the solver uses the CPU count (capped at `num_mc_runs`); values below `1` are coerced to `1`.
+- `freefile_error` (optional): When set, a separate file listing per-window bootstrap errors is written after the main surface output.
 
 Run the solver with:
 
