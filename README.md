@@ -26,6 +26,7 @@ periodic: true            # enable periodic coordinates
 period: pi                # "pi" uses 2*pi radians; numeric values accepted
 num_mc_runs: 0
 mc_seed: -12345
+aux_data_file: aux_data.yaml  # optional; emit inputs required for reweighting
 ```
 
 Run the solver with:
@@ -50,6 +51,69 @@ Each non-comment, non-empty line in `metadata_file` should contain:
   frames by `exp(-energy / kT)`; omit from all lines to use uniform weights.
 
 Lines may start with `#` for comments. Mixing lines with and without temperature is rejected.
+All metadata-referenced trajectories (for WHAM or projection runs) may use relative
+paths; they are resolved against the directory that contains the metadata file, so you
+can keep each metadata bundle self-contained regardless of the working directory.
+
+## Bayesian reweighting into auxiliary CVs
+
+To reuse WHAM trajectories and metadata for Bayesian projections, add `aux_data_file`
+to the 1D/2D configuration. When `wham` finishes it writes a self-contained
+`aux_data.yaml` file describing the umbrella histograms, bias parameters, raw
+trajectories, and the MAP/Monte-Carlo estimates of the partition-function ratios
+`f_i = Z/Z_i`. A minimal 1D example looks like:
+
+```yaml
+dim_umbrella: 1
+temperature: 300.0
+k_B: 0.0019872067
+periodicity: [false]
+periods: [null]
+histogram_edges:
+  - [-3.14, -1.0, 1.0, 3.14]
+windows:
+  - trajectory: traj_1.txt
+    bias_center: [0.0]
+    spring_constants: [2.0]
+    num_samples: 10000
+map_values: [1.0]       # populated when aux_data_file is set; edit to override
+mh_samples: []          # optional MH/bootstrapped samples, one row per draw
+projection_hist_edges: null    # supply the projection bin edges or a file path
+projection_bins:
+  - {min: -3.14, max: 3.14, num_bins: 200}
+projection_metadata: proj_metadata.txt   # mirrors WHAM metadata order; list one trajectory path per line
+output_dir: reweight_output
+```
+
+Before invoking the reweighter, edit this file to provide the projection histogram
+bins (using `{min, max, num_bins}` entries or an explicit edge list/file) and the synchronized
+auxiliary trajectories collected during umbrella sampling. The `map_values` and
+`mh_samples` entries are pre-filled by `wham`/`wham-2d` when `aux_data_file` is set,
+so most workflows only need to supply the projection data and adjust `output_dir`.
+
+Key sections:
+
+- `windows`: copied directly from the WHAM metadata (trajectory paths, bias centers, springs, sample counts).
+- `map_values`/`mh_samples`: MAP partition ratios and optional samples written by the solver; leave them alone unless you have external post-processing.
+- `projection_bins`: per-dimension `{min, max, num_bins}` specs describing the auxiliary CV histogram (or set `projection_hist_edges` / `projection_hist_edges_file` if you need irregular spacing).
+- `projection_metadata`: metadata file (same number and ordering of entries as the WHAM metadata) listing the projection trajectory paths; each line is resolved relative to the metadata file location (or absolute paths may be used).
+
+Run the projector with:
+
+```bash
+reweight aux_data.yaml
+```
+
+The solver reconstructs the umbrella histogram grid, pre-computes the harmonic biases,
+and iterates through all synchronized umbrella/projection samples. Each projected bin
+accumulates MAP and MH weights using the unbiased probabilities. Results now land in a
+single `reweight_output.yaml` file under `output_dir` containing:
+
+- `bin_centers`, `bin_widths`
+- `map`: probabilities, pdf, and free energy for the MAP estimate
+- `mh_samples`: per-sample probabilities, pdf, and free energy arrays
+
+These match the legacy Bayes script’s content while being easier to parse.
 
 ## Example data generation
 
@@ -132,6 +196,7 @@ periodic_x: true
 period_x: pi
 periodic_y: false
 period_y: 0
+aux_data_file: aux_data_2d.yaml
 ```
 
 Run the solver with:

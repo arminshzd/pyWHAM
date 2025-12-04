@@ -47,6 +47,7 @@ class Wham2DConfig:
     mc_seed: int | None = None
     mc_workers: int | None = None
     freefile_error_path: Path | None = None
+    aux_data_path: Path | None = None
 
     @property
     def bin_width_x(self) -> float:
@@ -59,6 +60,17 @@ class Wham2DConfig:
     @property
     def kT(self) -> float:
         return self.temperature * self.k_B
+
+
+@dataclass
+class MetadataEntry2D:
+    filename: Path
+    locx: float
+    locy: float
+    springx: float
+    springy: float
+    correl_time: float
+    temp: float
 
 
 class Wham2D:
@@ -140,6 +152,57 @@ class Wham2D:
     def get_numwindows(self, metadata: Iterable[str]) -> int:
         return sum(1 for line in metadata if self.is_metadata(line))
 
+    def _write_aux_data(
+        self,
+        entries: List[MetadataEntry2D],
+        hist_group: HistGroup2D,
+        map_values: List[float],
+        mh_samples: List[List[float]],
+    ) -> None:
+        if self.config.aux_data_path is None:
+            return
+        edges_x = np.linspace(
+            self.config.hist_min_x, self.config.hist_max_x, self.config.num_bins_x + 1, dtype=float
+        ).tolist()
+        edges_y = np.linspace(
+            self.config.hist_min_y, self.config.hist_max_y, self.config.num_bins_y + 1, dtype=float
+        ).tolist()
+        windows = []
+        for idx, entry in enumerate(entries):
+            histogram = hist_group.histograms[idx]
+            windows.append(
+                {
+                    "trajectory": str(entry.filename),
+                    "bias_center": [float(entry.locx), float(entry.locy)],
+                    "spring_constants": [float(entry.springx), float(entry.springy)],
+                    "num_samples": int(histogram.num_points),
+                }
+            )
+        aux_data = {
+            "wham_type": "2d",
+            "temperature": float(self.config.temperature),
+            "k_B": float(self.config.k_B),
+            "dim_umbrella": 2,
+            "periodicity": [bool(self.config.periodic_x), bool(self.config.periodic_y)],
+            "periods": [
+                float(self.config.period_x) if self.config.periodic_x else None,
+                float(self.config.period_y) if self.config.periodic_y else None,
+            ],
+            "histogram_edges": [edges_x, edges_y],
+            "metadata_file": str(self.config.metadata_path),
+            "windows": windows,
+            "map_values": map_values,
+            "mh_samples": mh_samples,
+            "projection_bins": [],
+            "projection_metadata": None,
+            "projection_traj_dir": None,
+            "output_dir": str(self.config.freefile_path.parent),
+        }
+        path = self.config.aux_data_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(aux_data, sort_keys=False), encoding="utf-8")
+        print(f"# Wrote auxiliary data to {path}")
+
     def read_data(self, filename: Path, have_energy: bool, use_mask: bool, mask: List[List[int]] | None) -> int:
         self.clear_histogram()
         count = 0
@@ -179,16 +242,20 @@ class Wham2D:
 
     def read_metadata(
         self, lines: Iterable[str], hist_group: HistGroup2D, use_mask: bool, mask: List[List[int]] | None
-    ) -> Tuple[int, bool]:
+    ) -> Tuple[int, bool, List[MetadataEntry2D]]:
         current_window = 0
         have_temp = False
         have_notemp = False
+        entries: list[MetadataEntry2D] = []
+        metadata_dir = self.config.metadata_path.parent
 
         for line in lines:
             if not self.is_metadata(line):
                 continue
             tokens = line.split()
             filename = Path(tokens[0])
+            if not filename.is_absolute():
+                filename = (metadata_dir / filename).resolve()
             locx = float(tokens[1])
             locy = float(tokens[2])
             springx = float(tokens[3])
@@ -210,6 +277,18 @@ class Wham2D:
 
             if (have_temp and have_notemp) or (not have_temp and not have_notemp):
                 raise ValueError("Some but not all metadata lines specify a temperature")
+
+            entries.append(
+                MetadataEntry2D(
+                    filename=filename,
+                    locx=locx,
+                    locy=locy,
+                    springx=springx,
+                    springy=springy,
+                    correl_time=correl_time,
+                    temp=temp,
+                )
+            )
 
             num_points = self.read_data(filename, have_temp, use_mask, mask)
             if num_points < 0:
@@ -245,7 +324,7 @@ class Wham2D:
             hist_group.partitions[current_window] = total
             current_window += 1
 
-        return current_window, have_temp
+        return current_window, have_temp, entries
 
     def _find_range(self) -> Tuple[int, int, int, int]:
         min_nonzero_x = 0
@@ -451,7 +530,7 @@ class Wham2D:
             mask = [[0 for _ in range(self.config.num_bins_y)] for _ in range(self.config.num_bins_x)]
 
         hist_group = self.make_hist_group(num_windows)
-        count_windows, have_temp = self.read_metadata(lines, hist_group, self.config.use_mask, mask)
+        count_windows, have_temp, entries = self.read_metadata(lines, hist_group, self.config.use_mask, mask)
         assert count_windows == hist_group.num_windows
 
         if have_temp:
@@ -542,6 +621,7 @@ class Wham2D:
         prob_std = np.zeros_like(final_prob)
         free_std = np.zeros_like(final_prob)
         window_std = np.zeros(hist_group.num_windows, dtype=final_prob.dtype)
+        mh_samples: list[list[float]] = []
 
         if self.config.num_mc_runs > 0:
             base_hist_group = _clone_hist_group(hist_group)
@@ -581,6 +661,8 @@ class Wham2D:
             ave_window = np.zeros(hist_group.num_windows, dtype=final_prob.dtype)
             ave_window2 = np.zeros(hist_group.num_windows, dtype=final_prob.dtype)
 
+            temp_array = np.asarray(hist_group.temperatures, dtype=float)
+
             for result in results:
                 assert result is not None
                 probabilities = np.asarray(result.probabilities, dtype=final_prob.dtype)
@@ -595,6 +677,7 @@ class Wham2D:
                 free_counts += free_mask.astype(np.int32)
                 ave_window += free_biases
                 ave_window2 += free_biases * free_biases
+                mh_samples.append(np.exp(-free_biases / temp_array).tolist())
 
             count = float(self.config.num_mc_runs)
             ave_prob /= count
@@ -726,6 +809,11 @@ class Wham2D:
                 errorfile.write("#Window\t\tFreeErr\n")
                 for i in range(hist_group.num_windows):
                     errorfile.write(f"#{i}\t{window_std[i]}\n")
+
+        map_values = np.exp(
+            -np.asarray(hist_group.free_energies, dtype=float) / np.asarray(hist_group.temperatures, dtype=float)
+        ).tolist()
+        self._write_aux_data(entries, hist_group, map_values, mh_samples)
 
     def _format_free_line(
         self,
@@ -929,6 +1017,8 @@ def build_config(yaml_path: Path) -> Wham2DConfig:
         if field not in config:
             raise ValueError(f"Missing required configuration field: {field}")
 
+    aux_data_path = Path(config["aux_data_file"]) if "aux_data_file" in config else None
+
     return Wham2DConfig(
         hist_min_x=float(config["hist_min_x"]),
         hist_max_x=float(config["hist_max_x"]),
@@ -953,6 +1043,7 @@ def build_config(yaml_path: Path) -> Wham2DConfig:
         mc_seed=(int(config["mc_seed"]) if "mc_seed" in config else None),
         mc_workers=(int(config["mc_workers"]) if "mc_workers" in config else None),
         freefile_error_path=(Path(config["freefile_error"]) if "freefile_error" in config else None),
+        aux_data_path=aux_data_path,
     )
 
 

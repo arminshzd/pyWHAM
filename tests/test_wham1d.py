@@ -121,9 +121,10 @@ def test_read_metadata_success(base_config: Wham1DConfig, tmp_path: Path) -> Non
     base_config.metadata_path = meta
     wham = Wham1D(base_config)
     group = wham.make_hist_group(1)
-    count, have_temp = wham.read_metadata(meta.read_text().splitlines(), group)
+    count, have_temp, entries = wham.read_metadata(meta.read_text().splitlines(), group)
     assert count == 1
     assert have_temp is True
+    assert len(entries) == 1
     hist = group.histograms[0]
     assert hist.data == [1.0, 1.0]
     assert group.partitions[0] == pytest.approx(2.0)
@@ -208,6 +209,20 @@ def test_run_creates_output(base_config: Wham1DConfig, tmp_path: Path, capsys: p
     assert base_config.freefile_path.exists()
     content = base_config.freefile_path.read_text(encoding="utf-8")
     assert "#Window" in content
+
+
+def test_aux_data_written(tmp_path: Path, base_config: Wham1DConfig) -> None:
+    meta, datafile = _prepare_metadata_files(tmp_path)
+    base_config.metadata_path = meta
+    base_config.aux_data_path = tmp_path / "aux.yaml"
+    wham = Wham1D(base_config)
+    group = wham.make_hist_group(1)
+    _, _, entries = wham.read_metadata(meta.read_text().splitlines(), group)
+    wham._write_aux_data(entries, group)
+    aux = yaml.safe_load(base_config.aux_data_path.read_text(encoding="utf-8"))
+    assert aux["dim_umbrella"] == 1
+    assert aux["windows"][0]["trajectory"] == str(datafile)
+    assert aux["map_file"] is None
 
 
 def test_mk_new_hist_and_random_bin(base_config: Wham1DConfig) -> None:

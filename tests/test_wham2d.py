@@ -167,10 +167,11 @@ def test_read_metadata_and_range(tmp_path: Path) -> None:
 
     wham = Wham2D(config)
     group = wham.make_hist_group(1)
-    count, have_temp = wham.read_metadata([metadata_line], group, False, None)
+    count, have_temp, entries = wham.read_metadata([metadata_line], group, False, None)
 
     assert count == 1
     assert have_temp is True
+    assert len(entries) == 1
     assert group.histograms[0].data == [[1.0]]
     assert group.partitions[0] == pytest.approx(1.0)
 
@@ -190,6 +191,23 @@ def test_find_range_and_get_histval(basic_config: Wham2DConfig) -> None:
     hist = Histogram2D(0, 1, 0, 1, 0, 0, data=[[4.0, 5.0], [6.0, 7.0]])
     assert wham.get_histval(hist, 1, 0) == 6.0
     assert wham.get_histval(hist, -1, 0) == 0.0
+
+
+def test_aux_data_written(tmp_path: Path, basic_config: Wham2DConfig) -> None:
+    data_file = tmp_path / "data.dat"
+    data_file.write_text("0 0.25 0.75\n0 0.5 0.5\n", encoding="utf-8")
+    metadata_path = tmp_path / "metadata.txt"
+    metadata_path.write_text(f"{data_file} 0.0 0.0 1.0 1.0\n", encoding="utf-8")
+    basic_config.metadata_path = metadata_path
+    basic_config.aux_data_path = tmp_path / "aux.yaml"
+    wham = Wham2D(basic_config)
+    group = wham.make_hist_group(1)
+    _, _, entries = wham.read_metadata(metadata_path.read_text().splitlines(), group, False, None)
+    wham._write_aux_data(entries, group)
+    aux = yaml.safe_load(basic_config.aux_data_path.read_text(encoding="utf-8"))
+    assert aux["dim_umbrella"] == 2
+    assert aux["windows"][0]["trajectory"] == str(data_file)
+    assert aux["output_dir"] == str(basic_config.freefile_path.parent)
 
 
 def test_save_convergence_and_average_diff(basic_config: Wham2DConfig) -> None:
@@ -372,5 +390,3 @@ def test_build_config_and_main(tmp_path: Path, capsys: pytest.CaptureFixture[str
     captured = capsys.readouterr()
     assert "#Number of windows = 1" in captured.out
     assert (tmp_path / "free.txt").exists()
-
-

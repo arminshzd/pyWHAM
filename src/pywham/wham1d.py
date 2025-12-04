@@ -38,6 +38,7 @@ class Wham1DConfig:
     mc_seed: int | None = None
     mc_workers: int | None = None
     ingest_workers: int | None = None
+    aux_data_path: Path | None = None
 
     @property
     def bin_width(self) -> float:
@@ -134,16 +135,19 @@ class Wham1D:
                     count += 1
         return histogram, count
 
-    def read_metadata(self, lines: Iterable[str], hist_group: HistGroup1D) -> Tuple[int, bool]:
+    def read_metadata(self, lines: Iterable[str], hist_group: HistGroup1D) -> Tuple[int, bool, List[MetadataEntry]]:
         entries: list[MetadataEntry] = []
         have_temp = False
         have_notemp = False
 
+        metadata_dir = self.config.metadata_path.parent
         for line in lines:
             if not self.is_metadata(line):
                 continue
             tokens = line.split()
             filename = Path(tokens[0])
+            if not filename.is_absolute():
+                filename = (metadata_dir / filename).resolve()
             loc = float(tokens[1])
             spring = float(tokens[2])
             correl_time = float(tokens[3]) if len(tokens) >= 4 else 1.0
@@ -202,7 +206,7 @@ class Wham1D:
             for warning in result.warnings:
                 print(warning)
 
-        return len(entries), have_temp
+        return len(entries), have_temp, entries
 
     @staticmethod
     def _find_range(histogram: list[float]) -> Tuple[int, int]:
@@ -241,6 +245,49 @@ class Wham1D:
             except ValueError:
                 pass
         return max(os.cpu_count() or 1, 1)
+
+    def _write_aux_data(
+        self,
+        entries: List[MetadataEntry],
+        hist_group: HistGroup1D,
+        map_values: List[float],
+        mh_samples: List[List[float]],
+    ) -> None:
+        if self.config.aux_data_path is None:
+            return
+        edges = np.linspace(self.config.hist_min, self.config.hist_max, self.config.num_bins + 1, dtype=float).tolist()
+        windows = []
+        for entry in entries:
+            histogram = hist_group.histograms[entry.index]
+            windows.append(
+                {
+                    "trajectory": str(entry.filename),
+                    "bias_center": [float(entry.loc)],
+                    "spring_constants": [float(entry.spring)],
+                    "num_samples": int(histogram.num_points),
+                }
+            )
+        aux_data = {
+            "wham_type": "1d",
+            "temperature": float(self.config.temperature),
+            "k_B": float(self.config.k_B),
+            "dim_umbrella": 1,
+            "periodicity": [bool(self.config.periodic)],
+            "periods": [float(self.config.period) if self.config.periodic else None],
+            "histogram_edges": [edges],
+            "metadata_file": str(self.config.metadata_path),
+            "windows": windows,
+            "map_values": map_values,
+            "mh_samples": mh_samples,
+            "projection_bins": [],
+            "projection_metadata": None,
+            "projection_traj_dir": None,
+            "output_dir": str(self.config.freefile_path.parent),
+        }
+        path = self.config.aux_data_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(aux_data, sort_keys=False), encoding="utf-8")
+        print(f"# Wrote auxiliary data to {path}")
 
 
     def get_histval(self, hist: Histogram1D, index: int) -> float:
@@ -317,7 +364,7 @@ class Wham1D:
         print(f"#Number of windows = {num_windows}")
 
         hist_group = self.make_hist_group(num_windows)
-        count_windows, have_temp = self.read_metadata(lines, hist_group)
+        count_windows, have_temp, entries = self.read_metadata(lines, hist_group)
         assert count_windows == hist_group.num_windows
 
         if have_temp:
@@ -383,6 +430,7 @@ class Wham1D:
         ave_pdf2 = [0.0 for _ in ave_pdf2]
         ave_F = [0.0 for _ in ave_F]
         ave_F2 = [0.0 for _ in ave_F2]
+        mh_samples: list[list[float]] = []
 
         if self.config.num_mc_runs > 0:
             base_hist_group = _clone_hist_group(hist_group)
@@ -418,6 +466,8 @@ class Wham1D:
                         idx = futures[future]
                         results[idx] = future.result()
 
+            temp_array = np.asarray(hist_group.temperatures, dtype=float)
+
             for result in results:
                 if result.too_many_iterations:
                     print(f"Too many iterations: {result.iterations}")
@@ -434,6 +484,9 @@ class Wham1D:
                 for j in range(hist_group.num_windows):
                     ave_F[j] += result.free_energies[j] - result.free_energies[0]
                     ave_F2[j] += result.free_energies[j] * result.free_energies[j]
+                mh_samples.append(
+                    np.exp(-np.asarray(result.free_energies, dtype=float) / temp_array).tolist()
+                )
 
             for i in range(self.config.num_bins):
                 ave_p[i] /= float(self.config.num_mc_runs)
@@ -471,6 +524,11 @@ class Wham1D:
             freefile.write("#Window\t\tFree\t+/-\t\n")
             for i in range(hist_group.num_windows):
                 freefile.write(f"#{i}\t{final_f[i]}\t{ave_F2[i]}\n")
+
+        map_values = np.exp(
+            -np.asarray(hist_group.free_energies, dtype=float) / np.asarray(hist_group.temperatures, dtype=float)
+        ).tolist()
+        self._write_aux_data(entries, hist_group, map_values, mh_samples)
 
     def mk_new_hist(
         self, cumulative: List[float], distribution: List[float], num_bins: int, num_points: int, generator: Generator
@@ -733,6 +791,8 @@ def build_config(yaml_path: Path) -> Wham1DConfig:
         ingest_workers = int(ingest_workers)
         if ingest_workers < 1:
             ingest_workers = 1
+    aux_data_file = config.get("aux_data_file")
+    aux_data_path = Path(aux_data_file) if aux_data_file is not None else None
 
     return Wham1DConfig(
         hist_min=float(config["hist_min"]),
@@ -750,6 +810,7 @@ def build_config(yaml_path: Path) -> Wham1DConfig:
         mc_seed=seed,
         mc_workers=workers,
         ingest_workers=ingest_workers,
+        aux_data_path=aux_data_path,
     )
 
 
