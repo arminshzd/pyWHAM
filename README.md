@@ -74,6 +74,8 @@ Lines may start with `#` for comments. Mixing lines with and without temperature
 All metadata-referenced trajectories (for WHAM or projection runs) may use relative
 paths; they are resolved against the directory that contains the metadata file, so you
 can keep each metadata bundle self-contained regardless of the working directory.
+If your trajectory files include a leading frame/index column, the reweighter
+automatically skips it and uses the next `dim_umbrella` columns, ignoring any extras.
 
 ## Bayesian reweighting into auxiliary CVs
 

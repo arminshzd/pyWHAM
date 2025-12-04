@@ -176,16 +176,20 @@ class Reweighter:
 
     def _load_umbrella_trajectories(self) -> List[np.ndarray]:
         trajectories: List[np.ndarray] = []
+        dim = self.aux.dim_umbrella
         for record in self.aux.windows:
             data = np.loadtxt(record.trajectory, dtype=float)
             data = np.atleast_2d(data)
-            if data.shape[1] != self.aux.dim_umbrella:
-                raise ValueError(f"{record.trajectory} does not match umbrella dimensionality {self.aux.dim_umbrella}")
+            if data.shape[1] < dim + 1:
+                raise ValueError(
+                    f"{record.trajectory} must contain at least {dim + 1} columns "
+                    "(an index/time column plus the umbrella coordinates)"
+                )
             if record.num_samples > 0 and data.shape[0] != record.num_samples:
                 raise ValueError(
                     f"{record.trajectory} contains {data.shape[0]} samples, expected {record.num_samples}"
                 )
-            trajectories.append(data)
+            trajectories.append(data[:, 1 : dim + 1])
         return trajectories
 
     def _load_projection_trajectories(self) -> List[np.ndarray]:
