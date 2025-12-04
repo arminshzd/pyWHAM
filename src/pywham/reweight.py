@@ -210,9 +210,12 @@ class Reweighter:
                 path = (base_dir / path).resolve()
             data = np.loadtxt(path, dtype=float)
             data = np.atleast_2d(data)
-            if data.shape[1] != dim_proj:
-                raise ValueError(f"{path} dimensionality does not match projection histogram definition")
-            trajectories.append(data)
+            if data.shape[1] < dim_proj + 1:
+                raise ValueError(
+                    f"{path} must contain at least {dim_proj + 1} columns "
+                    "(an index/time column plus the projection coordinates)"
+                )
+            trajectories.append(data[:, 1 : dim_proj + 1])
         if len(trajectories) != len(self.aux.windows):
             raise ValueError("Number of projection trajectories does not match number of umbrella windows")
         return trajectories
