@@ -174,6 +174,32 @@ def test_calc_free() -> None:
     assert free[1] == 0.0
 
 
+def test_calc_free_with_zero_probability() -> None:
+    config = Wham1DConfig(
+        hist_min=0.0,
+        hist_max=3.0,
+        num_bins=3,
+        tolerance=1e-6,
+        temperature=1.0,
+        numpad=0,
+        metadata_path=Path("meta"),
+        freefile_path=Path("free"),
+        periodic=False,
+        period=0.0,
+        k_B=1.0,
+    )
+    wham = Wham1D(config)
+
+    free, min_bin = wham.calc_free([0.0, 0.5, 0.0])
+    assert min_bin == 1
+    assert math.isinf(free[0])
+    assert math.isinf(free[2])
+    assert free[1] == pytest.approx(0.0)
+
+    with pytest.raises(ValueError):
+        wham.calc_free([0.0, 0.0, 0.0])
+
+
 def _single_window_group(config: Wham1DConfig) -> tuple[Wham1D, HistGroup1D, list[float]]:
     wham = Wham1D(config)
     hist = Histogram1D(first=0, last=0, num_points=2, num_mc_samples=2, data=[2.0], cumulative=[0.0])

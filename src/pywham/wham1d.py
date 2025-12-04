@@ -310,12 +310,38 @@ class Wham1D:
         previous = np.asarray(hist_group.previous_free_energies, dtype=float)
         return float(np.mean(np.abs(current - previous)))
 
+    def _write_iteration_snapshot(
+        self, iteration: int, free_energy: list[float], probabilities: list[float], free_energies: list[float]
+    ) -> None:
+        with self.config.freefile_path.open("w", encoding="utf-8") as freefile:
+            freefile.write(f"# Iteration {iteration}\n")
+            freefile.write("#Coor\tFree\tProb\n")
+            for i in range(self.config.num_bins):
+                coor = self.calc_coor(i)
+                freefile.write(f"{coor:.6f}\t{free_energy[i]:.6f}\t{probabilities[i]:.6e}\n")
+            freefile.write("\n# Window\tFree (free energy units)\n")
+            for idx, value in enumerate(free_energies):
+                freefile.write(f"#{idx}\t{value:.6f}\n")
+
 
     def calc_free(self, probabilities: List[float]) -> Tuple[List[float], int]:
-        free = [-self.config.kT * math.log(p) for p in probabilities]
-        min_val = min(free)
-        bin_min = free.index(min_val)
-        adjusted = [f - min_val for f in free]
+        epsilon = float(np.finfo(float).tiny)
+
+        free: list[float] = []
+        for probability in probabilities:
+            if probability <= 0.0:
+                free.append(math.inf)
+            else:
+                clamped_prob = max(probability, epsilon)
+                free.append(-self.config.kT * math.log(clamped_prob))
+
+        finite_indices = [idx for idx, value in enumerate(free) if math.isfinite(value)]
+        if not finite_indices:
+            raise ValueError("No positive probabilities provided")
+
+        bin_min = min(finite_indices, key=free.__getitem__)
+        min_val = free[bin_min]
+        adjusted = [(f - min_val) if math.isfinite(f) else math.inf for f in free]
         return adjusted, bin_min
 
     def wham_iteration(self, hist_group: HistGroup1D, prob: List[float], have_energy: bool) -> None:
@@ -395,26 +421,17 @@ class Wham1D:
             iteration += 1
             if iteration % 10 == 0:
                 error = self.average_diff(hist_group)
-                print(f"#Iteration {iteration}:  {error}")
+                print(f"# Iteration {iteration:8d} | error {error:12.6e}")
             if iteration % 100 == 0:
                 free_energy, _ = self.calc_free(probabilities)
-                for i in range(self.config.num_bins):
-                    coor = self.calc_coor(i)
-                    print(f"{coor}\t{free_energy[i]}\t{probabilities[i]}")
-                print()
-                print("# Dumping simulation biases, in the metadata file order ")
-                print("# Window  F (free energy units)")
+                self._write_iteration_snapshot(iteration, free_energy, probabilities, hist_group.free_energies)
                 for j in range(hist_group.num_windows):
-                    print(f"# {j}\t{hist_group.free_energies[j]}")
                     final_f[j] = hist_group.free_energies[j]
             if iteration >= 100000:
                 print(f"Too many iterations: {iteration}")
                 break
 
-        print("# Dumping simulation biases, in the metadata file order ")
-        print("# Window  F (free energy units)")
         for j in range(hist_group.num_windows):
-            print(f"# {j}\t{hist_group.free_energies[j]}")
             final_f[j] = hist_group.free_energies[j]
 
         total = sum(probabilities)
@@ -604,8 +621,16 @@ def _build_histogram(
             trimmed.cumulative[i - min_nonzero] = trimmed.cumulative[i - min_nonzero - 1] + histogram[i - 1]
 
     total = trimmed.cumulative[num_used] + histogram[max_nonzero]
+    tiny = float(np.finfo(float).tiny)
+    if total <= tiny:
+        warnings.append(
+            "# Warning: Window"
+            f" {source} has near-zero counts/partition; consider removing it from the metadata"
+            " or rerunning with a softer spring."
+        )
+    safe_total = max(total, tiny)
     for i in range(num_used + 1):
-        trimmed.cumulative[i] /= total
+        trimmed.cumulative[i] /= safe_total
 
     return trimmed, total, warnings
 

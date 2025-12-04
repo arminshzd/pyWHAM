@@ -79,11 +79,22 @@ class Wham2D:
         self.histogram: List[List[float]] = [
             [0.0 for _ in range(config.num_bins_y)] for _ in range(config.num_bins_x)
         ]
+        self._low_weight_warnings: set[int] = set()
 
     def clear_histogram(self) -> None:
         for i in range(self.config.num_bins_x):
             for j in range(self.config.num_bins_y):
                 self.histogram[i][j] = 0.0
+
+    def _warn_low_weight_window(self, index: int, issue: str) -> None:
+        if index in self._low_weight_warnings:
+            return
+        print(
+            "# Warning: Window"
+            f" {index} {issue}; consider removing it from the metadata"
+            " or rerunning with a softer spring."
+        )
+        self._low_weight_warnings.add(index)
 
     def calc_coor(self, i: int, j: int) -> Tuple[float, float]:
         return (
@@ -384,6 +395,22 @@ class Wham2D:
             error += abs(cur - prev)
         return error / float(len(logged_current)) if logged_current else 0.0
 
+    def _write_iteration_snapshot(
+        self, iteration: int, free_energy: list[list[float]], probabilities: np.ndarray, free_energies: list[float]
+    ) -> None:
+        with self.config.freefile_path.open("w", encoding="utf-8") as freefile:
+            freefile.write(f"# Iteration {iteration}\n")
+            freefile.write("#X\tY\tFree\tProb\n")
+            for i in range(self.config.num_bins_x):
+                for j in range(self.config.num_bins_y):
+                    coor = self.calc_coor(i, j)
+                    freefile.write(
+                        f"{coor[0]:.6f}\t{coor[1]:.6f}\t{free_energy[i][j]:.6f}\t{probabilities[i][j]:.6e}\n"
+                    )
+            freefile.write("\n# Window\tFree (free energy units)\n")
+            for idx, value in enumerate(free_energies):
+                freefile.write(f"#{idx}\t{value:.6f}\n")
+
     def calc_free(self, prob: List[List[float]], use_mask: bool, mask: List[List[int]] | None) -> List[List[float]]:
         free = [[0.0 for _ in range(self.config.num_bins_y)] for _ in range(self.config.num_bins_x)]
         epsilon = float(np.finfo(float).tiny)
@@ -448,9 +475,13 @@ class Wham2D:
             dtype=dtype,
         )
         weight = np.asarray(hist_group.previous_free_energies, dtype=dtype) * factors
+        tiny = finfo.tiny
+        for idx, (factor, w_val) in enumerate(zip(factors, weight)):
+            if factor <= tiny or w_val <= tiny:
+                issue = "has near-zero counts/partition" if factor <= tiny else "has near-zero weight"
+                self._warn_low_weight_window(idx, issue)
         with np.errstate(over="ignore"):
             denom = np.tensordot(bias_lookup, weight, axes=([2], [0]))
-        tiny = finfo.tiny
         if mask_arr is not None:
             denom = np.where(mask_arr, denom, 1.0)
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
@@ -586,25 +617,13 @@ class Wham2D:
             converged = self.is_converged(hist_group, logged_current, logged_previous)
             if iteration % 10 == 0:
                 error = self.average_diff(logged_current, logged_previous)
-                print(f"#Iteration {iteration}:  {error}")
+                print(f"# Iteration {iteration:8d} | error {error:12.6e}")
             if iteration % 100 == 0:
                 free_ene = self.calc_free(prob, self.config.use_mask, mask)
-                for i in range(self.config.num_bins_x):
-                    for j in range(self.config.num_bins_y):
-                        coor = self.calc_coor(i, j)
-                        print(f"{coor[0]}\t{coor[1]}\t{free_ene[i][j]}\t{prob[i][j]}")
-                print("# Dumping simulation biases, in the metadata file order ")
-                print("# Window  F (free energy units)")
-                for j in range(hist_group.num_windows):
-                    print(f"# {j}\t{hist_group.free_energies[j]}")
+                self._write_iteration_snapshot(iteration, free_ene, prob, hist_group.free_energies)
             if iteration >= 100000:
                 print(f"Too many iterations: {iteration}")
                 break
-
-        print("# Dumping simulation biases, in the metadata file order ")
-        print("# Window  F (free energy units)")
-        for j in range(hist_group.num_windows):
-            print(f"# {j}\t{hist_group.free_energies[j] - hist_group.free_energies[0]}")
 
         free_ene = np.asarray(self.calc_free(prob, self.config.use_mask, mask), dtype=prob.dtype)
         total = float(np.sum(prob))
