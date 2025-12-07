@@ -12,8 +12,10 @@ def _create_auxiliary_setup(base_dir: Path) -> Path:
     output_dir = base_dir / "output"
     output_dir.mkdir()
 
-    umbrella_traj = np.array([[0.25], [0.75], [1.25], [1.75]])
-    proj_traj = np.array([[-0.5], [-0.3], [0.2], [0.8]])
+    umbrella_coords = np.array([0.25, 0.75, 1.25, 1.75])
+    projection_coords = np.array([-0.5, -0.3, 0.2, 0.8])
+    umbrella_traj = np.column_stack((np.arange(len(umbrella_coords)), umbrella_coords))
+    proj_traj = np.column_stack((np.arange(len(projection_coords)), projection_coords))
     umb_path = base_dir / "traj_1.txt"
     proj_path = base_dir / "proj_1.txt"
     np.savetxt(umb_path, umbrella_traj, fmt="%.4f")
@@ -85,7 +87,7 @@ def test_reweight_result_write(tmp_path: Path) -> None:
     result.write(output_file)
     payload = yaml.safe_load(output_file.read_text(encoding="utf-8"))
     assert payload["map"]["probabilities"] == pytest.approx([0.6, 0.4])
-    assert payload["mh_samples"]["probabilities"] == pytest.approx([[0.6], [0.4]])
+    assert np.asarray(payload["mh_samples"]["probabilities"]) == pytest.approx(np.array([[0.6], [0.4]]))
 
 
 def test_load_aux_data_success(tmp_path: Path) -> None:
@@ -119,11 +121,76 @@ def test_reweighter_run_end_to_end(tmp_path: Path) -> None:
     assert output_file.exists()
     payload = yaml.safe_load(output_file.read_text(encoding="utf-8"))
     assert payload["map"]["probabilities"] == pytest.approx([0.5, 0.5])
-    assert payload["mh_samples"]["probabilities"] == pytest.approx([[0.5, 0.5], [0.5, 0.5]])
+    assert np.asarray(payload["mh_samples"]["probabilities"]) == pytest.approx(np.array([[0.5, 0.5], [0.5, 0.5]]))
+
+
+def test_reweighter_respects_positive_beta_free_energy(tmp_path: Path) -> None:
+    base_dir = tmp_path / "weighted"
+    base_dir.mkdir()
+    output_dir = base_dir / "output"
+    output_dir.mkdir()
+
+    # Two windows with distinct free energies; the second window has F = ln 2
+    umb1 = np.array([[0.0, -1.0], [1.0, -1.0]])
+    umb2 = np.array([[0.0, 1.0], [1.0, 1.0]])
+    proj1 = umb1.copy()
+    proj2 = umb2.copy()
+    umb1_path = base_dir / "traj_1.txt"
+    umb2_path = base_dir / "traj_2.txt"
+    proj1_path = base_dir / "proj_1.txt"
+    proj2_path = base_dir / "proj_2.txt"
+    np.savetxt(umb1_path, umb1, fmt="%.6f")
+    np.savetxt(umb2_path, umb2, fmt="%.6f")
+    np.savetxt(proj1_path, proj1, fmt="%.6f")
+    np.savetxt(proj2_path, proj2, fmt="%.6f")
+
+    map_values = [1.0, 0.5]  # exp(-beta F) with F = ln 2 for the second window
+    mh_samples = [map_values]
+    aux_dict = {
+        "dim_umbrella": 1,
+        "temperature": 1.0,
+        "k_B": 1.0,
+        "periodicity": [False],
+        "periods": [None],
+        "histogram_edges": [[-2.0, 0.0, 2.0]],
+        "windows": [
+            {
+                "trajectory": umb1_path.name,
+                "bias_center": [-1.0],
+                "spring_constants": [1.0],
+                "num_samples": umb1.shape[0],
+            },
+            {
+                "trajectory": umb2_path.name,
+                "bias_center": [1.0],
+                "spring_constants": [1.0],
+                "num_samples": umb2.shape[0],
+            },
+        ],
+        "map_values": map_values,
+        "mh_samples": mh_samples,
+        "projection_hist_edges": [[-2.0, 0.0, 2.0]],
+        "projection_metadata": "projection_meta.txt",
+        "output_dir": output_dir.name,
+    }
+
+    (base_dir / "projection_meta.txt").write_text(
+        f"{proj1_path.name}\n{proj2_path.name}\n", encoding="utf-8"
+    )
+    aux_path = base_dir / "aux_data.yaml"
+    aux_path.write_text(yaml.safe_dump(aux_dict), encoding="utf-8")
+
+    aux = load_aux_data(aux_path)
+    reweighter = Reweighter(aux)
+    result = reweighter.run()
+
+    expected = [0.6269, 0.3731]
+    assert result.probabilities_map == pytest.approx(expected, rel=2e-3)
+    assert result.probabilities_mh[:, 0] == pytest.approx(expected, rel=2e-3)
 
 
 def test_reweight_cli_main(tmp_path: Path) -> None:
     aux_path = _create_auxiliary_setup(tmp_path / "cli")
     rw.main([str(aux_path)])
     aux = load_aux_data(aux_path)
-    assert (aux.output_dir / "p_PROJ_MAP.txt").exists()
+    assert (aux.output_dir / "reweight_output.yaml").exists()

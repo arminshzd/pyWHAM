@@ -98,7 +98,7 @@ windows:
     bias_center: [0.0]
     spring_constants: [2.0]
     num_samples: 10000
-map_values: [1.0]       # populated when aux_data_file is set; edit to override
+map_values: [1.0]       # exp(-βF_i) populated when aux_data_file is set; edit to override
 mh_samples: []          # optional MH/bootstrapped samples, one row per draw
 projection_hist_edges: null    # supply the projection bin edges or a file path
 projection_bins:
@@ -116,7 +116,7 @@ so most workflows only need to supply the projection data and adjust `output_dir
 Key sections:
 
 - `windows`: copied directly from the WHAM metadata (trajectory paths, bias centers, springs, sample counts).
-- `map_values`/`mh_samples`: MAP partition ratios and optional samples written by the solver; leave them alone unless you have external post-processing.
+- `map_values`/`mh_samples`: MAP partition ratios (stored as exp(-βF_i) so the reweighter multiplies by exp(+βF_i) when combining with bias weights) and optional samples written by the solver; leave them alone unless you have external post-processing.
 - `projection_bins`: per-dimension `{min, max, num_bins}` specs describing the auxiliary CV histogram (or set `projection_hist_edges` / `projection_hist_edges_file` if you need irregular spacing).
 - `projection_metadata`: metadata file (same number and ordering of entries as the WHAM metadata) listing the projection trajectory paths; each line is resolved relative to the metadata file location (or absolute paths may be used).
 

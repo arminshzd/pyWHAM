@@ -275,9 +275,9 @@ def save_free_energy_plots(
     data = np.loadtxt(freefile)
     data = np.atleast_2d(data)
 
-    if data.ndim != 2 or data.shape[1] not in (4, 5):
+    if data.ndim != 2 or data.shape[1] not in (4, 5, 6):
         raise ValueError(
-            "freefile must contain either five columns (1D WHAM) or four columns (2D WHAM)"
+            "freefile must contain five columns (1D WHAM) or four/six columns (2D WHAM)"
         )
 
     if max_F is not None:

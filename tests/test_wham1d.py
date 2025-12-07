@@ -244,11 +244,13 @@ def test_aux_data_written(tmp_path: Path, base_config: Wham1DConfig) -> None:
     wham = Wham1D(base_config)
     group = wham.make_hist_group(1)
     _, _, entries = wham.read_metadata(meta.read_text().splitlines(), group)
-    wham._write_aux_data(entries, group)
+    map_values = [1.0 for _ in entries]
+    mh_samples: list[list[float]] = []
+    wham._write_aux_data(entries, group, map_values, mh_samples)
     aux = yaml.safe_load(base_config.aux_data_path.read_text(encoding="utf-8"))
     assert aux["dim_umbrella"] == 1
     assert aux["windows"][0]["trajectory"] == str(datafile)
-    assert aux["map_file"] is None
+    assert aux["map_values"] == map_values
 
 
 def test_mk_new_hist_and_random_bin(base_config: Wham1DConfig) -> None:

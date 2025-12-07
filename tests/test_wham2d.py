@@ -203,7 +203,9 @@ def test_aux_data_written(tmp_path: Path, basic_config: Wham2DConfig) -> None:
     wham = Wham2D(basic_config)
     group = wham.make_hist_group(1)
     _, _, entries = wham.read_metadata(metadata_path.read_text().splitlines(), group, False, None)
-    wham._write_aux_data(entries, group)
+    map_values = [1.0 for _ in entries]
+    mh_samples: list[list[float]] = []
+    wham._write_aux_data(entries, group, map_values, mh_samples)
     aux = yaml.safe_load(basic_config.aux_data_path.read_text(encoding="utf-8"))
     assert aux["dim_umbrella"] == 2
     assert aux["windows"][0]["trajectory"] == str(data_file)

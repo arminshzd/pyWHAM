@@ -102,8 +102,15 @@ class Reweighter:
         bin_volumes_proj = _bin_volumes([edges[1:] - edges[:-1] for edges in edges_proj])
         bias_lookup = self._bias_lookup(umb_centers, umb_forces, hist_centers, periods)
 
-        map_prefactors = N_i * f_map
-        mh_prefactors = f_mh * N_i[None, :]
+        if np.any(f_map <= 0):
+            raise ValueError("map_values must be positive to compute exp(+beta F_i)")
+        map_prefactors = np.divide(N_i, f_map)
+        if f_mh.size > 0:
+            if np.any(f_mh <= 0):
+                raise ValueError("mh_samples must be positive to compute exp(+beta F_i)")
+            mh_prefactors = np.divide(N_i[None, :], f_mh)
+        else:
+            mh_prefactors = f_mh
 
         p_map = np.zeros(total_bins_proj, dtype=float)
         p_mh = np.zeros((total_bins_proj, f_mh.shape[0]), dtype=float)
