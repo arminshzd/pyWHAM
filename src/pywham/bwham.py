@@ -327,7 +327,7 @@ class BayesWHAM:
     def run(self) -> None:
         if self.config.dimension == 1:
             wham = Wham1D(self.config.base_config)  # type: ignore[arg-type]
-            hist_group, have_energy, _ = self._load_1d(wham)
+            hist_group, have_energy, entries = self._load_1d(wham)
             map_free, map_prob = self._run_wham_1d(wham, hist_group, have_energy)
             samples_free, samples_prob, window_samples = self._bayes_samples_1d(wham, hist_group, have_energy)
             mean_free = samples_free.mean(axis=0) if samples_free.size else np.asarray(map_free, dtype=float)
@@ -351,10 +351,11 @@ class BayesWHAM:
                 std_window_free=std_window.tolist(),
             )
             self._format_output_1d(wham, result)
+            wham._write_aux_data(entries, hist_group, result.map_window_free, window_samples.tolist())
             return
 
         wham2d = Wham2D(self.config.base_config)  # type: ignore[arg-type]
-        hist_group2d, have_energy2d, _, mask = self._load_2d(wham2d)
+        hist_group2d, have_energy2d, entries2d, mask = self._load_2d(wham2d)
         map_free_2d, map_prob_2d = self._run_wham_2d(wham2d, hist_group2d, have_energy2d, mask)
         samples_free_2d, samples_prob_2d, window_samples_2d = self._bayes_samples_2d(
             wham2d, hist_group2d, have_energy2d, mask
@@ -395,9 +396,17 @@ class BayesWHAM:
             std_window_free=std_window_2d.tolist(),
         )
         self._format_output_2d(wham2d, result2d)
+        wham2d._write_aux_data(entries2d, hist_group2d, result2d.map_window_free, window_samples_2d.tolist())
 
 
 # --- configuration ------------------------------------------------------
+
+
+def _resolve_relative(path_raw: str, base_dir: Path) -> Path:
+    path = Path(path_raw)
+    if not path.is_absolute():
+        path = (base_dir / path).resolve()
+    return path
 
 
 def build_config(yaml_path: Path) -> BayesWhamConfig:
@@ -434,6 +443,13 @@ def build_config(yaml_path: Path) -> BayesWhamConfig:
         for field in required_fields:
             if field not in config_raw:
                 raise ValueError(f"Missing required configuration field: {field}")
+        metadata_path = _resolve_relative(str(config_raw["metadata_file"]), yaml_path.parent)
+        metadata_dir = metadata_path.parent
+        freefile_path = _resolve_relative(str(config_raw["freefile"]), metadata_dir)
+        aux_data_path = None
+        if "aux_data_file" in config_raw:
+            aux_data_path = _resolve_relative(str(config_raw["aux_data_file"]), metadata_dir)
+
         base = Wham2DConfig(
             hist_min_x=float(config_raw["hist_min_x"]),
             hist_max_x=float(config_raw["hist_max_x"]),
@@ -444,8 +460,8 @@ def build_config(yaml_path: Path) -> BayesWhamConfig:
             tolerance=float(config_raw["tolerance"]),
             temperature=float(config_raw["temperature"]),
             numpad=int(config_raw["numpad"]),
-            metadata_path=Path(config_raw["metadata_file"]),
-            freefile_path=Path(config_raw["freefile"]),
+            metadata_path=metadata_path,
+            freefile_path=freefile_path,
             use_mask=bool(config_raw["use_mask"]),
             periodic_x=periodic_x,
             period_x=period_x,
@@ -457,8 +473,12 @@ def build_config(yaml_path: Path) -> BayesWhamConfig:
             num_mc_runs=0,
             mc_seed=None,
             mc_workers=None,
-            freefile_error_path=None,
-            aux_data_path=Path(config_raw["aux_data_file"]) if "aux_data_file" in config_raw else None,
+            freefile_error_path=(
+                _resolve_relative(str(config_raw["freefile_error"]), metadata_dir)
+                if "freefile_error" in config_raw
+                else None
+            ),
+            aux_data_path=aux_data_path,
         )
         return BayesWhamConfig(
             dimension=2,
@@ -484,6 +504,13 @@ def build_config(yaml_path: Path) -> BayesWhamConfig:
     for field in required_fields:
         if field not in config_raw:
             raise ValueError(f"Missing required configuration field: {field}")
+    metadata_path = _resolve_relative(str(config_raw["metadata_file"]), yaml_path.parent)
+    metadata_dir = metadata_path.parent
+    freefile_path = _resolve_relative(str(config_raw["freefile"]), metadata_dir)
+    aux_data_path = None
+    if "aux_data_file" in config_raw:
+        aux_data_path = _resolve_relative(str(config_raw["aux_data_file"]), metadata_dir)
+
     base = Wham1DConfig(
         hist_min=float(config_raw["hist_min"]),
         hist_max=float(config_raw["hist_max"]),
@@ -491,8 +518,8 @@ def build_config(yaml_path: Path) -> BayesWhamConfig:
         tolerance=float(config_raw["tolerance"]),
         temperature=float(config_raw["temperature"]),
         numpad=int(config_raw["numpad"]),
-        metadata_path=Path(config_raw["metadata_file"]),
-        freefile_path=Path(config_raw["freefile"]),
+        metadata_path=metadata_path,
+        freefile_path=freefile_path,
         periodic=periodic,
         period=period,
         k_B=k_B,
@@ -500,7 +527,7 @@ def build_config(yaml_path: Path) -> BayesWhamConfig:
         mc_seed=None,
         mc_workers=None,
         ingest_workers=None,
-        aux_data_path=None,
+        aux_data_path=aux_data_path,
     )
     return BayesWhamConfig(
         dimension=1,
