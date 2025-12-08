@@ -1,0 +1,14 @@
+# bwham-config.yml
+hist_min: -1.0
+hist_max: 1.0
+num_bins: 50
+tolerance: 1e-5
+temperature: 1.0
+numpad: 0
+metadata_file: examples/output_1D/umbrella_metadata.txt
+freefile: examples/output_1D/bayes.free
+num_samples: 400
+burn_in: 100
+thinning: 2
+# optional Bayesian prior strength
+# dirichlet_alpha: 1.0
