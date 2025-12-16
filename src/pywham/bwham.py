@@ -114,7 +114,9 @@ class BayesWHAM:
                 hist_group.temperatures[i] = wham.config.kT
         return hist_group, have_temp, entries
 
-    def _run_wham_1d(self, wham: Wham1D, hist_group: HistGroup1D, have_energy: bool) -> tuple[List[float], List[float]]:
+    def _run_wham_1d(
+        self, wham: Wham1D, hist_group: HistGroup1D, have_energy: bool, log_iterations: bool = False
+    ) -> tuple[List[float], List[float]]:
         probabilities = [0.0 for _ in range(wham.config.num_bins)]
         iteration = 0
         first = True
@@ -123,6 +125,12 @@ class BayesWHAM:
             wham.save_free(hist_group)
             wham.wham_iteration(hist_group, probabilities, have_energy)
             iteration += 1
+            if log_iterations and iteration % 10 == 0:
+                error = wham.average_diff(hist_group)
+                print(f"# Iteration {iteration:8d} | error {error:12.6e}")
+            if log_iterations and iteration % 100 == 0:
+                free_snapshot, _ = wham.calc_free(probabilities)
+                wham._write_iteration_snapshot(iteration, free_snapshot, probabilities, hist_group.free_energies)
             if iteration >= 100000:
                 print(f"Too many iterations: {iteration}")
                 break
@@ -234,7 +242,12 @@ class BayesWHAM:
         return hist_group, have_temp, entries, mask
 
     def _run_wham_2d(
-        self, wham: Wham2D, hist_group: HistGroup2D, have_energy: bool, mask: list[list[int]] | None
+        self,
+        wham: Wham2D,
+        hist_group: HistGroup2D,
+        have_energy: bool,
+        mask: list[list[int]] | None,
+        log_iterations: bool = False,
     ) -> tuple[List[List[float]], List[List[float]]]:
         dtype = np.float32 if wham.config.use_float32 else np.float64
         x_grid, y_grid = wham._coordinate_grids(dtype)
@@ -270,6 +283,12 @@ class BayesWHAM:
                 for i in range(hist_group.num_windows)
             ]
             converged = wham.is_converged(hist_group, logged_current, logged_previous)
+            if log_iterations and iteration % 10 == 0:
+                error = wham.average_diff(logged_current, logged_previous)
+                print(f"# Iteration {iteration:8d} | error {error:12.6e}")
+            if log_iterations and iteration % 100 == 0:
+                free_snapshot = wham.calc_free(prob.tolist(), wham.config.use_mask, mask)
+                wham._write_iteration_snapshot(iteration, free_snapshot, prob, hist_group.free_energies)
             if iteration >= 100000:
                 print(f"Too many iterations: {iteration}")
                 break
@@ -328,7 +347,7 @@ class BayesWHAM:
         if self.config.dimension == 1:
             wham = Wham1D(self.config.base_config)  # type: ignore[arg-type]
             hist_group, have_energy, entries = self._load_1d(wham)
-            map_free, map_prob = self._run_wham_1d(wham, hist_group, have_energy)
+            map_free, map_prob = self._run_wham_1d(wham, hist_group, have_energy, log_iterations=True)
             samples_free, samples_prob, window_samples = self._bayes_samples_1d(wham, hist_group, have_energy)
             mean_free = samples_free.mean(axis=0) if samples_free.size else np.asarray(map_free, dtype=float)
             std_free = samples_free.std(axis=0) if samples_free.size else np.zeros_like(map_free, dtype=float)
@@ -356,7 +375,7 @@ class BayesWHAM:
 
         wham2d = Wham2D(self.config.base_config)  # type: ignore[arg-type]
         hist_group2d, have_energy2d, entries2d, mask = self._load_2d(wham2d)
-        map_free_2d, map_prob_2d = self._run_wham_2d(wham2d, hist_group2d, have_energy2d, mask)
+        map_free_2d, map_prob_2d = self._run_wham_2d(wham2d, hist_group2d, have_energy2d, mask, log_iterations=True)
         samples_free_2d, samples_prob_2d, window_samples_2d = self._bayes_samples_2d(
             wham2d, hist_group2d, have_energy2d, mask
         )
