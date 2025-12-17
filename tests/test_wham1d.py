@@ -152,6 +152,7 @@ def test_save_free_and_convergence(wham: Wham1D) -> None:
     group.free_energies[1] = 2.5
     assert not wham.is_converged(group)
     assert wham.average_diff(group) == pytest.approx(0.25)
+    assert wham.convergence_error(group) == pytest.approx(0.5)
 
 
 def test_calc_free() -> None:

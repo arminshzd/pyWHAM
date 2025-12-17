@@ -395,6 +395,14 @@ class Wham2D:
             error += abs(cur - prev)
         return error / float(len(logged_current)) if logged_current else 0.0
 
+    def convergence_error(self, logged_current: List[float], logged_previous: List[float]) -> float:
+        max_error = 0.0
+        for cur, prev in zip(logged_current, logged_previous):
+            diff = abs(cur - prev)
+            if diff > max_error:
+                max_error = diff
+        return max_error
+
     def _write_iteration_snapshot(
         self, iteration: int, free_energy: list[list[float]], probabilities: np.ndarray, free_energies: list[float]
     ) -> None:
@@ -616,7 +624,7 @@ class Wham2D:
             ]
             converged = self.is_converged(hist_group, logged_current, logged_previous)
             if iteration % 10 == 0:
-                error = self.average_diff(logged_current, logged_previous)
+                error = self.convergence_error(logged_current, logged_previous)
                 print(f"# Iteration {iteration:8d} | error {error:12.6e}")
             if iteration % 100 == 0:
                 free_ene = self.calc_free(prob, self.config.use_mask, mask)

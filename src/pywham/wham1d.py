@@ -310,6 +310,13 @@ class Wham1D:
         previous = np.asarray(hist_group.previous_free_energies, dtype=float)
         return float(np.mean(np.abs(current - previous)))
 
+    def convergence_error(self, hist_group: HistGroup1D) -> float:
+        current = np.asarray(hist_group.free_energies, dtype=float)
+        previous = np.asarray(hist_group.previous_free_energies, dtype=float)
+        if current.size == 0:
+            return 0.0
+        return float(np.max(np.abs(current - previous)))
+
     def _write_iteration_snapshot(
         self, iteration: int, free_energy: list[float], probabilities: list[float], free_energies: list[float]
     ) -> None:
@@ -420,7 +427,7 @@ class Wham1D:
             self.wham_iteration(hist_group, probabilities, have_energy)
             iteration += 1
             if iteration % 10 == 0:
-                error = self.average_diff(hist_group)
+                error = self.convergence_error(hist_group)
                 print(f"# Iteration {iteration:8d} | error {error:12.6e}")
             if iteration % 100 == 0:
                 free_energy, _ = self.calc_free(probabilities)

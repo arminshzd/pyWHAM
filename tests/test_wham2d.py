@@ -222,6 +222,7 @@ def test_save_convergence_and_average_diff(basic_config: Wham2DConfig) -> None:
     logged_previous = [0.45, 0.55]
     assert wham.is_converged(group, logged_current, logged_previous)
     assert wham.average_diff(logged_current, logged_previous) == pytest.approx(0.05)
+    assert wham.convergence_error(logged_current, logged_previous) == pytest.approx(0.05)
 
     logged_current[1] = 0.0
     assert not wham.is_converged(group, logged_current, logged_previous)

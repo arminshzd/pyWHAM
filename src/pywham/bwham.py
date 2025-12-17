@@ -16,6 +16,10 @@ from .wham1d import Wham1D, Wham1DConfig, parse_periodic as parse_periodic_1d, p
 from .wham2d import Wham2D, Wham2DConfig, parse_periodic as parse_periodic_2d
 
 
+def _log_message(message: str) -> None:
+    print(f"[BayesWHAM] {message}")
+
+
 @dataclass
 class BayesWhamConfig:
     """Configuration for running BayesWHAM."""
@@ -68,12 +72,26 @@ class BayesWHAM:
 
     def __init__(self, config: BayesWhamConfig):
         self.config = config
+        self._log(
+            f"Initialized BayesWHAM for {config.dimension}D with {config.num_samples} samples "
+            f"(burn-in {config.burn_in}, thinning {config.thinning})."
+        )
+
+    def _log(self, message: str) -> None:
+        _log_message(message)
 
     def _posterior_samples(self) -> int:
+        self._log(
+            f"Preparing posterior sampling plan: total draws={self.config.num_samples}, "
+            f"burn-in={self.config.burn_in}, thinning={self.config.thinning}."
+        )
         usable = max(self.config.num_samples - self.config.burn_in, 0)
         if usable == 0:
+            self._log("No usable samples remain after burn-in. Posterior sampling disabled.")
             return 0
-        return (usable + self.config.thinning - 1) // self.config.thinning
+        sample_count = (usable + self.config.thinning - 1) // self.config.thinning
+        self._log(f"Posterior sampling will keep {sample_count} draws.")
+        return sample_count
 
     # --- 1D helpers -----------------------------------------------------
     def _resample_hist1d(self, hist: Histogram1D, rng: np.random.Generator) -> Histogram1D:
@@ -103,41 +121,51 @@ class BayesWHAM:
         )
 
     def _load_1d(self, wham: Wham1D) -> tuple[HistGroup1D, bool, list]:
+        self._log(f"Loading 1D metadata from {wham.config.metadata_path}")
         lines = wham.config.metadata_path.read_text(encoding="utf-8").splitlines()
         num_windows = wham.get_numwindows(lines)
         print(f"#Number of windows = {num_windows}")
+        self._log(f"Metadata reports {num_windows} windows.")
         hist_group = wham.make_hist_group(num_windows)
         count_windows, have_temp, entries = wham.read_metadata(lines, hist_group)
         assert count_windows == hist_group.num_windows
         if not have_temp:
+            self._log("No explicit temperatures detected; populating temperatures from configuration kT.")
             for i in range(hist_group.num_windows):
                 hist_group.temperatures[i] = wham.config.kT
+        self._log("Histogram group populated for 1D run.")
         return hist_group, have_temp, entries
 
     def _run_wham_1d(
         self, wham: Wham1D, hist_group: HistGroup1D, have_energy: bool, log_iterations: bool = False
     ) -> tuple[List[float], List[float]]:
+        self._log("Starting WHAM 1D iteration loop.")
         probabilities = [0.0 for _ in range(wham.config.num_bins)]
         iteration = 0
         first = True
+        printed_iteration = False
         while not wham.is_converged(hist_group) or first:
             first = False
             wham.save_free(hist_group)
             wham.wham_iteration(hist_group, probabilities, have_energy)
             iteration += 1
             if log_iterations and iteration % 10 == 0:
-                error = wham.average_diff(hist_group)
-                print(f"# Iteration {iteration:8d} | error {error:12.6e}")
+                error = wham.convergence_error(hist_group)
+                print(f"# Iteration {iteration:8d} | error {error:12.6e}", end="\r", flush=True)
+                printed_iteration = True
             if log_iterations and iteration % 100 == 0:
                 free_snapshot, _ = wham.calc_free(probabilities)
                 wham._write_iteration_snapshot(iteration, free_snapshot, probabilities, hist_group.free_energies)
             if iteration >= 100000:
                 print(f"Too many iterations: {iteration}")
                 break
+        if log_iterations and printed_iteration:
+            print()
         total = sum(probabilities)
         if total:
             probabilities = [p / total for p in probabilities]
         free_energy, _ = wham.calc_free(probabilities)
+        self._log(f"Completed WHAM 1D loop after {iteration} iterations.")
         return free_energy, probabilities
 
     def _bayes_samples_1d(
@@ -148,7 +176,9 @@ class BayesWHAM:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         sample_count = self._posterior_samples()
         if sample_count == 0:
+            self._log("Skipping Bayesian sampling for 1D because no samples are requested.")
             return np.empty((0, wham.config.num_bins)), np.empty((0, wham.config.num_bins)), np.empty((0, base_group.num_windows))
+        self._log(f"Running Bayesian sampling for 1D histograms with {self.config.num_samples} total draws.")
         rng = np.random.default_rng()
         free_samples = np.zeros((sample_count, wham.config.num_bins), dtype=float)
         prob_samples = np.zeros_like(free_samples)
@@ -157,18 +187,23 @@ class BayesWHAM:
         base_histograms = list(base_group.histograms)
         idx = 0
         for draw in range(self.config.num_samples):
+            self._log(f"Dirichlet resampling draw {draw + 1}/{self.config.num_samples}.")
             resampled = self._clone_group_1d(base_group)
             resampled.histograms = [self._resample_hist1d(hist, rng) for hist in base_histograms]
             free_energy, probabilities = self._run_wham_1d(wham, resampled, have_energy)
             if draw < self.config.burn_in or (draw - self.config.burn_in) % self.config.thinning != 0:
                 continue
+            accepted_idx = idx + 1
             free_samples[idx, :] = np.asarray(free_energy, dtype=float)
             prob_samples[idx, :] = np.asarray(probabilities, dtype=float)
             window_samples[idx, :] = np.asarray(resampled.free_energies, dtype=float)
+            self._log(f"Accepted posterior sample {accepted_idx}/{sample_count}.")
             idx += 1
+        self._log("Completed Bayesian sampling for 1D histograms.")
         return free_samples[:idx, :], prob_samples[:idx, :], window_samples[:idx, :]
 
     def _format_output_1d(self, wham: Wham1D, result: BayesResult1D) -> None:
+        self._log(f"Writing 1D BayesWHAM summary to {wham.config.freefile_path}")
         with wham.config.freefile_path.open("w", encoding="utf-8") as freefile:
             freefile.write("#Coor\tFree\tProb\tMeanFree\tStdFree\tMeanProb\tStdProb\n")
             for coor, f_map, p_map, f_mean, f_std, p_mean, p_std in zip(
@@ -222,9 +257,11 @@ class BayesWHAM:
         )
 
     def _load_2d(self, wham: Wham2D):
+        self._log(f"Loading 2D metadata from {wham.config.metadata_path}")
         lines = wham.config.metadata_path.read_text(encoding="utf-8").splitlines()
         num_windows = wham.get_numwindows(lines)
         print(f"#Number of windows = {num_windows}")
+        self._log(f"Metadata reports {num_windows} 2D windows.")
 
         mask = None
         if wham.config.use_mask:
@@ -234,11 +271,13 @@ class BayesWHAM:
         count_windows, have_temp, entries = wham.read_metadata(lines, hist_group, wham.config.use_mask, mask)
         assert count_windows == hist_group.num_windows
         if not have_temp:
+            self._log("No explicit window temperatures in metadata; applying config temperature.")
             for i in range(hist_group.num_windows):
                 hist_group.temperatures[i] = wham.config.kT
         for i in range(hist_group.num_windows):
             hist_group.free_energies[i] = 1.0
             hist_group.previous_free_energies[i] = 1.0
+        self._log("Histogram group populated for 2D run.")
         return hist_group, have_temp, entries, mask
 
     def _run_wham_2d(
@@ -249,6 +288,7 @@ class BayesWHAM:
         mask: list[list[int]] | None,
         log_iterations: bool = False,
     ) -> tuple[List[List[float]], List[List[float]]]:
+        self._log("Starting WHAM 2D iteration loop.")
         dtype = np.float32 if wham.config.use_float32 else np.float64
         x_grid, y_grid = wham._coordinate_grids(dtype)
 
@@ -266,6 +306,7 @@ class BayesWHAM:
         iteration = 0
         first = True
         converged = False
+        printed_iteration = False
         while not converged or first:
             first = False
             wham.save_free(hist_group)
@@ -284,8 +325,9 @@ class BayesWHAM:
             ]
             converged = wham.is_converged(hist_group, logged_current, logged_previous)
             if log_iterations and iteration % 10 == 0:
-                error = wham.average_diff(logged_current, logged_previous)
-                print(f"# Iteration {iteration:8d} | error {error:12.6e}")
+                error = wham.convergence_error(logged_current, logged_previous)
+                print(f"# Iteration {iteration:8d} | error {error:12.6e}", end="\r", flush=True)
+                printed_iteration = True
             if log_iterations and iteration % 100 == 0:
                 free_snapshot = wham.calc_free(prob.tolist(), wham.config.use_mask, mask)
                 wham._write_iteration_snapshot(iteration, free_snapshot, prob, hist_group.free_energies)
@@ -297,6 +339,9 @@ class BayesWHAM:
         total = float(np.sum(prob))
         if total > 0:
             prob /= total
+        if log_iterations and printed_iteration:
+            print()
+        self._log(f"Completed WHAM 2D loop after {iteration} iterations.")
         return free_energy.tolist(), prob.tolist()
 
     def _bayes_samples_2d(
@@ -304,9 +349,11 @@ class BayesWHAM:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         sample_count = self._posterior_samples()
         if sample_count == 0:
+            self._log("Skipping Bayesian sampling for 2D because no samples are requested.")
             return np.empty((0, wham.config.num_bins_x, wham.config.num_bins_y)), np.empty(
                 (0, wham.config.num_bins_x, wham.config.num_bins_y)
             ), np.empty((0, base_group.num_windows))
+        self._log(f"Running Bayesian sampling for 2D histograms with {self.config.num_samples} total draws.")
         rng = np.random.default_rng()
         free_samples = np.zeros((sample_count, wham.config.num_bins_x, wham.config.num_bins_y), dtype=float)
         prob_samples = np.zeros_like(free_samples)
@@ -315,18 +362,23 @@ class BayesWHAM:
         base_histograms = list(base_group.histograms)
         idx = 0
         for draw in range(self.config.num_samples):
+            self._log(f"Dirichlet resampling draw {draw + 1}/{self.config.num_samples} for 2D histograms.")
             resampled = self._clone_group_2d(base_group)
             resampled.histograms = [self._resample_hist2d(hist, rng) for hist in base_histograms]
             free_energy, probabilities = self._run_wham_2d(wham, resampled, have_energy, mask)
             if draw < self.config.burn_in or (draw - self.config.burn_in) % self.config.thinning != 0:
                 continue
+            accepted_idx = idx + 1
             free_samples[idx, :, :] = np.asarray(free_energy, dtype=float)
             prob_samples[idx, :, :] = np.asarray(probabilities, dtype=float)
             window_samples[idx, :] = np.asarray(resampled.free_energies, dtype=float)
+            self._log(f"Accepted posterior sample {accepted_idx}/{sample_count} for 2D histograms.")
             idx += 1
+        self._log("Completed Bayesian sampling for 2D histograms.")
         return free_samples[:idx, :, :], prob_samples[:idx, :, :], window_samples[:idx, :]
 
     def _format_output_2d(self, wham: Wham2D, result: BayesResult2D) -> None:
+        self._log(f"Writing 2D BayesWHAM summary to {wham.config.freefile_path}")
         with wham.config.freefile_path.open("w", encoding="utf-8") as freefile:
             freefile.write("#X\tY\tFree\tProb\tMeanFree\tStdFree\tMeanProb\tStdProb\n")
             for i in range(wham.config.num_bins_x):
@@ -344,7 +396,9 @@ class BayesWHAM:
 
     # --- User facing ----------------------------------------------------
     def run(self) -> None:
+        self._log("Starting BayesWHAM run.")
         if self.config.dimension == 1:
+            self._log("Executing 1D workflow.")
             wham = Wham1D(self.config.base_config)  # type: ignore[arg-type]
             hist_group, have_energy, entries = self._load_1d(wham)
             map_free, map_prob = self._run_wham_1d(wham, hist_group, have_energy, log_iterations=True)
@@ -369,10 +423,13 @@ class BayesWHAM:
                 mean_window_free=mean_window.tolist(),
                 std_window_free=std_window.tolist(),
             )
+            self._log("Writing outputs and auxiliary data for 1D run.")
             self._format_output_1d(wham, result)
             wham._write_aux_data(entries, hist_group, result.map_window_free, window_samples.tolist())
+            self._log("1D BayesWHAM run completed.")
             return
 
+        self._log("Executing 2D workflow.")
         wham2d = Wham2D(self.config.base_config)  # type: ignore[arg-type]
         hist_group2d, have_energy2d, entries2d, mask = self._load_2d(wham2d)
         map_free_2d, map_prob_2d = self._run_wham_2d(wham2d, hist_group2d, have_energy2d, mask, log_iterations=True)
@@ -414,8 +471,10 @@ class BayesWHAM:
             mean_window_free=mean_window_2d.tolist(),
             std_window_free=std_window_2d.tolist(),
         )
+        self._log("Writing outputs and auxiliary data for 2D run.")
         self._format_output_2d(wham2d, result2d)
         wham2d._write_aux_data(entries2d, hist_group2d, result2d.map_window_free, window_samples_2d.tolist())
+        self._log("2D BayesWHAM run completed.")
 
 
 # --- configuration ------------------------------------------------------
@@ -432,6 +491,7 @@ def build_config(yaml_path: Path) -> BayesWhamConfig:
     if not yaml_path.exists():
         raise FileNotFoundError(f"YAML configuration file not found: {yaml_path}")
 
+    _log_message(f"Building BayesWHAM configuration from {yaml_path}")
     config_raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     if not isinstance(config_raw, dict):
         raise ValueError("YAML configuration must define a mapping of parameters")
@@ -442,6 +502,7 @@ def build_config(yaml_path: Path) -> BayesWhamConfig:
     dirichlet_alpha = float(config_raw.get("dirichlet_alpha", 1.0))
 
     if "hist_min_y" in config_raw:
+        _log_message("Detected 2D configuration in YAML.")
         k_B = parse_units(config_raw.get("units"))
         periodic_x, period_x = parse_periodic_2d(config_raw, "x")
         periodic_y, period_y = parse_periodic_2d(config_raw, "y")
@@ -499,6 +560,7 @@ def build_config(yaml_path: Path) -> BayesWhamConfig:
             ),
             aux_data_path=aux_data_path,
         )
+        _log_message("Finished assembling 2D BayesWHAM configuration.")
         return BayesWhamConfig(
             dimension=2,
             base_config=base,
@@ -508,6 +570,7 @@ def build_config(yaml_path: Path) -> BayesWhamConfig:
             dirichlet_alpha=dirichlet_alpha,
         )
 
+    _log_message("Detected 1D configuration in YAML. Assembling base parameters.")
     k_B = parse_units(config_raw.get("units"))
     periodic, period = parse_periodic_1d(config_raw)
     required_fields = [
@@ -548,6 +611,7 @@ def build_config(yaml_path: Path) -> BayesWhamConfig:
         ingest_workers=None,
         aux_data_path=aux_data_path,
     )
+    _log_message("Finished assembling 1D BayesWHAM configuration.")
     return BayesWhamConfig(
         dimension=1,
         base_config=base,
