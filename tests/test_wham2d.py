@@ -122,14 +122,17 @@ def test_read_data_with_energy_and_mask(tmp_path: Path, basic_config: Wham2DConf
 0 0.5 0.5 1.0
 1 1.5 1.5 0.0
 2 0.2 0.2 0.5
+3 2.5 2.5 0.1
     """.strip())
 
     wham = Wham2D(basic_config)
     mask = [[0, 0], [0, 0]]
-    count = wham.read_data(data_file, have_energy=True, use_mask=True, mask=mask)
+    count, dropped, raw = wham.read_data(data_file, have_energy=True, use_mask=True, mask=mask)
 
     expected_weight = math.exp(-1.0 / wham.config.kT) + math.exp(-0.5 / wham.config.kT)
+    assert raw == 4
     assert count == 3
+    assert dropped == [3]
     assert wham.histogram[0][0] == pytest.approx(expected_weight)
     assert wham.histogram[1][1] == pytest.approx(1.0)
     assert mask == [[1, 0], [0, 1]]

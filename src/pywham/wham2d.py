@@ -6,7 +6,7 @@ import concurrent.futures
 import math
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
@@ -71,6 +71,8 @@ class MetadataEntry2D:
     springy: float
     correl_time: float
     temp: float
+    raw_samples: int = 0
+    dropped_samples: List[int] = field(default_factory=list)
 
 
 class Wham2D:
@@ -187,6 +189,8 @@ class Wham2D:
                     "bias_center": [float(entry.locx), float(entry.locy)],
                     "spring_constants": [float(entry.springx), float(entry.springy)],
                     "num_samples": int(histogram.num_points),
+                    "raw_samples": int(entry.raw_samples) if entry.raw_samples else int(histogram.num_points),
+                    "dropped_samples": list(entry.dropped_samples),
                 }
             )
         aux_data = {
@@ -214,9 +218,13 @@ class Wham2D:
         path.write_text(yaml.safe_dump(aux_data, sort_keys=False), encoding="utf-8")
         print(f"# Wrote auxiliary data to {path}")
 
-    def read_data(self, filename: Path, have_energy: bool, use_mask: bool, mask: List[List[int]] | None) -> int:
+    def read_data(
+        self, filename: Path, have_energy: bool, use_mask: bool, mask: List[List[int]] | None
+    ) -> Tuple[int, List[int], int]:
         self.clear_histogram()
         count = 0
+        dropped_indices: list[int] = []
+        total_samples = 0
         with filename.open("r", encoding="utf-8") as handle:
             for raw in handle:
                 if raw.startswith("#"):
@@ -231,11 +239,13 @@ class Wham2D:
                     energy = float(energy_s)
                 else:
                     if len(parts) < 3:
-                        continue
+                        raise ValueError(f"Failure reading {filename}: missing coordinate value")
                     _, value_x_s, value_y_s = parts[:3]
                     value_x = float(value_x_s)
                     value_y = float(value_y_s)
                     energy = 0.0
+                sample_index = total_samples
+                total_samples += 1
                 if (
                     self.config.hist_min_x < value_x < self.config.hist_max_x
                     and self.config.hist_min_y < value_y < self.config.hist_max_y
@@ -249,7 +259,9 @@ class Wham2D:
                     count += 1
                     if use_mask and mask is not None:
                         mask[index_x][index_y] = 1
-        return count
+                else:
+                    dropped_indices.append(sample_index)
+        return count, dropped_indices, total_samples
 
     def read_metadata(
         self, lines: Iterable[str], hist_group: HistGroup2D, use_mask: bool, mask: List[List[int]] | None
@@ -301,7 +313,7 @@ class Wham2D:
                 )
             )
 
-            num_points = self.read_data(filename, have_temp, use_mask, mask)
+            num_points, dropped_samples, raw_samples = self.read_data(filename, have_temp, use_mask, mask)
             if num_points < 0:
                 raise OSError(f"Error trying to read {filename}")
 
@@ -333,6 +345,8 @@ class Wham2D:
                 trimmed.cumulative[bin_index] /= total
             hist_group.histograms[current_window] = trimmed
             hist_group.partitions[current_window] = total
+            entries[current_window].raw_samples = raw_samples
+            entries[current_window].dropped_samples = dropped_samples
             current_window += 1
 
         return current_window, have_temp, entries
