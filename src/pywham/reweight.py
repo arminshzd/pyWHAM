@@ -265,10 +265,10 @@ class Reweighter:
             diff = delta[:, :, dim_index]
             if periodic:
                 period = periods[dim_index]
-                diff = np.abs(diff)
-                delta[:, :, dim_index] = np.minimum.reduce(
-                    [diff, np.abs(diff + period), np.abs(diff - period)]
-                )
+                # Apply minimum image convention: wrap to [-period/2, period/2]
+                # This handles separations spanning multiple periods correctly
+                diff = diff - period * np.round(diff / period)
+                delta[:, :, dim_index] = np.abs(diff)
             else:
                 delta[:, :, dim_index] = np.abs(diff)
         energy = 0.5 * np.sum(forces[:, None, :] * delta * delta, axis=2)
@@ -463,8 +463,16 @@ def _locate_bin(values: np.ndarray, edges: Sequence[np.ndarray]) -> tuple[int, .
     subs: List[int] = []
     for coord, axis_edges in zip(values, edges):
         idx = int(np.searchsorted(axis_edges, coord, side="right") - 1)
-        if idx < 0 or idx >= len(axis_edges) - 1:
+        # Handle out of bounds: below minimum
+        if idx < 0:
             return None
+        # Handle upper edge: include values exactly at maximum in last bin
+        if idx >= len(axis_edges) - 1:
+            # If coord equals the upper edge exactly, include it in the last bin
+            if coord == axis_edges[-1] and idx == len(axis_edges) - 1:
+                idx = len(axis_edges) - 2
+            else:
+                return None
         subs.append(idx)
     return tuple(subs)
 
