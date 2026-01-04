@@ -71,6 +71,39 @@ Each non-comment, non-empty line in `metadata_file` should contain:
   frames by `exp(-energy / kT)`; omit from all lines to use uniform weights.
 
 Lines may start with `#` for comments. Mixing lines with and without temperature is rejected.
+
+### BayesWHAM configuration
+
+Bayesian reconstruction uses the same metadata and trajectory layout as the WHAM
+solvers and accepts the corresponding 1D or 2D histogram parameters. Append the
+following fields to reuse existing YAML inputs:
+
+- `num_samples` (optional, default `200`): total Dirichlet-resampled histograms
+  to draw for posterior estimation.
+- `burn_in` (optional, default `50`): number of initial samples to discard
+  before collecting posterior statistics.
+- `thinning` (optional, default `1`): stride between retained samples.
+- `dirichlet_alpha` (optional, default `1.0`): concentration added to each
+  histogram bin prior to sampling, mirroring the noninformative prior used in
+  the reference BayesWHAM script.
+
+Example 1D configuration (reuses the umbrella trajectories and metadata from the
+WHAM example):
+
+```yaml
+hist_min: -1.0
+hist_max: 1.0
+num_bins: 50
+tolerance: 1e-5
+temperature: 1.0
+numpad: 0
+metadata_file: examples/output_1D/umbrella_metadata.txt
+freefile: examples/output_1D/bayes.free
+num_samples: 400
+burn_in: 100
+thinning: 2
+dirichlet_alpha: 1.0
+```
 All metadata-referenced trajectories (for WHAM or projection runs) may use relative
 paths; they are resolved against the directory that contains the metadata file, so you
 can keep each metadata bundle self-contained regardless of the working directory.
@@ -145,6 +178,7 @@ Sample umbrella-sampling configuration files are included under `examples/`:
 # 1D trajectories and WHAM reconstruction
 python examples/langevin_umbrella.py --config examples/umbrella_config_1d.yaml
 python -m pywham.wham1d examples/wham1d_config.yaml
+python -m pywham.bwham examples/bwham_config.yaml
 
 # 2D trajectories on the Müller-Brown surface and WHAM2D reconstruction
 python examples/langevin_umbrella_2d.py --config examples/umbrella_config_2d.yaml

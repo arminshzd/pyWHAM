@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Sequence
 
@@ -18,6 +18,8 @@ class WindowRecord:
     bias_center: List[float]
     spring_constants: List[float]
     num_samples: int
+    raw_samples: int
+    dropped_samples: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -108,6 +110,8 @@ class Reweighter:
         p_map = np.zeros(total_bins_proj, dtype=float)
         p_mh = np.zeros((total_bins_proj, f_mh.shape[0]), dtype=float)
 
+        skipped_map = 0
+        skipped_mh = 0
         for sim_index, (traj_i, traj_proj_i) in enumerate(zip(traj, traj_proj), start=1):
             for sample_idx in range(traj_i.shape[0]):
                 proj_coords = traj_proj_i[sample_idx]
@@ -124,16 +128,25 @@ class Reweighter:
                 weights = bias_lookup[:, idx_umb]
                 denom_map = float(np.dot(map_prefactors, weights))
                 if denom_map == 0.0:
-                    raise ZeroDivisionError("Encountered zero denominator while computing MAP weight")
-                p_map[idx_proj] += 1.0 / denom_map
+                    skipped_map += 1
+                else:
+                    p_map[idx_proj] += 1.0 / denom_map
 
                 if f_mh.size > 0:
                     denom_mh = mh_prefactors @ weights
-                    if np.any(denom_mh == 0.0):
-                        raise ZeroDivisionError("Encountered zero denominator while computing MH weights")
-                    p_mh[idx_proj, :] += 1.0 / denom_mh
+                    mask = denom_mh != 0.0
+                    skipped_mh += int(mask.size - np.count_nonzero(mask))
+                    if np.any(mask):
+                        p_mh[idx_proj, mask] += 1.0 / denom_mh[mask]
 
             print(f"# Completed projection for simulation {sim_index}")
+
+        if skipped_map:
+            print(f"# Skipped {skipped_map} samples with zero MAP denominators; resulting bins will remain empty")
+        if skipped_mh:
+            print(
+                f"# Skipped {skipped_mh} MH weight evaluations with zero denominators; affected bins will remain empty"
+            )
 
         p_map = _normalize_vector(p_map)
         p_mh = _normalize_matrix_columns(p_mh)
@@ -185,11 +198,17 @@ class Reweighter:
                     f"{record.trajectory} must contain at least {dim + 1} columns "
                     "(an index/time column plus the umbrella coordinates)"
                 )
-            if record.num_samples > 0 and data.shape[0] != record.num_samples:
+            expected_raw = record.raw_samples if record.raw_samples > 0 else data.shape[0]
+            if data.shape[0] != expected_raw:
                 raise ValueError(
-                    f"{record.trajectory} contains {data.shape[0]} samples, expected {record.num_samples}"
+                    f"{record.trajectory} contains {data.shape[0]} samples, expected {expected_raw}"
                 )
-            trajectories.append(data[:, 1 : dim + 1])
+            trimmed = _filter_samples(data[:, 1 : dim + 1], record.dropped_samples)
+            if record.num_samples > 0 and trimmed.shape[0] != record.num_samples:
+                raise ValueError(
+                    f"{record.trajectory} retains {trimmed.shape[0]} samples after filtering, expected {record.num_samples}"
+                )
+            trajectories.append(trimmed)
         return trajectories
 
     def _load_projection_trajectories(self) -> List[np.ndarray]:
@@ -200,10 +219,14 @@ class Reweighter:
         lines = metadata_path.read_text(encoding="utf-8").splitlines()
         trajectories: List[np.ndarray] = []
         dim_proj = len(self.aux.projection_hist_edges)
+        window_index = 0
         for entry in lines:
             entry = entry.strip()
             if not entry or entry.startswith("#"):
                 continue
+            if window_index >= len(self.aux.windows):
+                raise ValueError("Projection metadata specifies more trajectories than umbrella windows")
+            window_record = self.aux.windows[window_index]
             parts = entry.split()
             path = Path(parts[0])
             if not path.is_absolute():
@@ -215,7 +238,16 @@ class Reweighter:
                     f"{path} must contain at least {dim_proj + 1} columns "
                     "(an index/time column plus the projection coordinates)"
                 )
-            trajectories.append(data[:, 1 : dim_proj + 1])
+            expected_raw = window_record.raw_samples if window_record.raw_samples > 0 else data.shape[0]
+            if data.shape[0] != expected_raw:
+                raise ValueError(f"{path} contains {data.shape[0]} samples, expected {expected_raw}")
+            filtered = _filter_samples(data[:, 1 : dim_proj + 1], window_record.dropped_samples)
+            if filtered.shape[0] != window_record.num_samples:
+                raise ValueError(
+                    f"{path} retains {filtered.shape[0]} samples after filtering, expected {window_record.num_samples}"
+                )
+            trajectories.append(filtered)
+            window_index += 1
         if len(trajectories) != len(self.aux.windows):
             raise ValueError("Number of projection trajectories does not match number of umbrella windows")
         return trajectories
@@ -233,10 +265,10 @@ class Reweighter:
             diff = delta[:, :, dim_index]
             if periodic:
                 period = periods[dim_index]
-                diff = np.abs(diff)
-                delta[:, :, dim_index] = np.minimum.reduce(
-                    [diff, np.abs(diff + period), np.abs(diff - period)]
-                )
+                # Apply minimum image convention: wrap to [-period/2, period/2]
+                # This handles separations spanning multiple periods correctly
+                diff = diff - period * np.round(diff / period)
+                delta[:, :, dim_index] = np.abs(diff)
             else:
                 delta[:, :, dim_index] = np.abs(diff)
         energy = 0.5 * np.sum(forces[:, None, :] * delta * delta, axis=2)
@@ -281,7 +313,19 @@ def load_aux_data(yaml_path: Path) -> AuxData:
         bias_center = _ensure_float_list(entry.get("bias_center"), dim, "bias_center")
         springs = _ensure_float_list(entry.get("spring_constants"), dim, "spring_constants")
         num_samples = int(entry.get("num_samples", 0))
-        windows.append(WindowRecord(trajectory, bias_center, springs, num_samples))
+        raw_samples = int(entry.get("raw_samples", num_samples))
+        dropped_raw = entry.get("dropped_samples", [])
+        dropped_samples = [int(idx) for idx in dropped_raw] if dropped_raw else []
+        windows.append(
+            WindowRecord(
+                trajectory=trajectory,
+                bias_center=bias_center,
+                spring_constants=springs,
+                num_samples=num_samples,
+                raw_samples=raw_samples,
+                dropped_samples=dropped_samples,
+            )
+        )
 
     map_values_raw = config.get("map_values")
     if map_values_raw is None:
@@ -404,12 +448,31 @@ def _bin_volumes(widths: Sequence[np.ndarray]) -> np.ndarray:
     return volume.reshape(-1)
 
 
+def _filter_samples(data: np.ndarray, dropped: Sequence[int]) -> np.ndarray:
+    if not dropped:
+        return data
+    mask = np.ones(data.shape[0], dtype=bool)
+    for idx in dropped:
+        if idx < 0 or idx >= data.shape[0]:
+            raise ValueError(f"Dropped sample index {idx} is out of bounds for trajectory with {data.shape[0]} samples")
+        mask[idx] = False
+    return data[mask]
+
+
 def _locate_bin(values: np.ndarray, edges: Sequence[np.ndarray]) -> tuple[int, ...] | None:
     subs: List[int] = []
     for coord, axis_edges in zip(values, edges):
         idx = int(np.searchsorted(axis_edges, coord, side="right") - 1)
-        if idx < 0 or idx >= len(axis_edges) - 1:
+        # Handle out of bounds: below minimum
+        if idx < 0:
             return None
+        # Handle upper edge: include values exactly at maximum in last bin
+        if idx >= len(axis_edges) - 1:
+            # If coord equals the upper edge exactly, include it in the last bin
+            if coord == axis_edges[-1] and idx == len(axis_edges) - 1:
+                idx = len(axis_edges) - 2
+            else:
+                return None
         subs.append(idx)
     return tuple(subs)
 

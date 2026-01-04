@@ -6,7 +6,7 @@ import concurrent.futures
 import math
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
@@ -106,9 +106,13 @@ class Wham1D:
         return sum(1 for line in metadata if self.is_metadata(line))
 
     @staticmethod
-    def read_data(filename: Path, have_energy: bool, config: Wham1DConfig) -> Tuple[list[float], int]:
+    def read_data(
+        filename: Path, have_energy: bool, config: Wham1DConfig
+    ) -> Tuple[list[float], int, List[int], int]:
         histogram = [0.0 for _ in range(config.num_bins)]
         count = 0
+        dropped_indices: list[int] = []
+        total_samples = 0
         with filename.open("r", encoding="utf-8") as handle:
             for raw in handle:
                 if raw.startswith("#"):
@@ -126,6 +130,8 @@ class Wham1D:
                     _, value_s = parts[:2]
                     value = float(value_s)
                     energy = 0.0
+                sample_index = total_samples
+                total_samples += 1
                 if config.hist_min < value < config.hist_max:
                     index = int((value - config.hist_min) / config.bin_width)
                     if have_energy:
@@ -133,7 +139,9 @@ class Wham1D:
                     else:
                         histogram[index] += 1.0
                     count += 1
-        return histogram, count
+                else:
+                    dropped_indices.append(sample_index)
+        return histogram, count, dropped_indices, total_samples
 
     def read_metadata(self, lines: Iterable[str], hist_group: HistGroup1D) -> Tuple[int, bool, List[MetadataEntry]]:
         entries: list[MetadataEntry] = []
@@ -203,6 +211,8 @@ class Wham1D:
                 hist_group.temperatures[entry.index] = -1.0
             hist_group.histograms[entry.index] = result.histogram
             hist_group.partitions[entry.index] = result.partition
+            entry.raw_samples = result.raw_samples
+            entry.dropped_samples = result.dropped_samples
             for warning in result.warnings:
                 print(warning)
 
@@ -265,6 +275,8 @@ class Wham1D:
                     "bias_center": [float(entry.loc)],
                     "spring_constants": [float(entry.spring)],
                     "num_samples": int(histogram.num_points),
+                    "raw_samples": int(entry.raw_samples) if entry.raw_samples else int(histogram.num_points),
+                    "dropped_samples": list(entry.dropped_samples),
                 }
             )
         aux_data = {
@@ -309,6 +321,13 @@ class Wham1D:
         current = np.asarray(hist_group.free_energies, dtype=float)
         previous = np.asarray(hist_group.previous_free_energies, dtype=float)
         return float(np.mean(np.abs(current - previous)))
+
+    def convergence_error(self, hist_group: HistGroup1D) -> float:
+        current = np.asarray(hist_group.free_energies, dtype=float)
+        previous = np.asarray(hist_group.previous_free_energies, dtype=float)
+        if current.size == 0:
+            return 0.0
+        return float(np.max(np.abs(current - previous)))
 
     def _write_iteration_snapshot(
         self, iteration: int, free_energy: list[float], probabilities: list[float], free_energies: list[float]
@@ -420,7 +439,7 @@ class Wham1D:
             self.wham_iteration(hist_group, probabilities, have_energy)
             iteration += 1
             if iteration % 10 == 0:
-                error = self.average_diff(hist_group)
+                error = self.convergence_error(hist_group)
                 print(f"# Iteration {iteration:8d} | error {error:12.6e}")
             if iteration % 100 == 0:
                 free_energy, _ = self.calc_free(probabilities)
@@ -570,6 +589,8 @@ class MetadataEntry:
     spring: float
     correl_time: float
     temp: float
+    raw_samples: int = 0
+    dropped_samples: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -580,6 +601,8 @@ class WindowLoadResult:
     min_nonzero: int
     max_nonzero: int
     warnings: list[str]
+    raw_samples: int
+    dropped_samples: list[int]
 
 
 def _build_histogram(
@@ -636,7 +659,7 @@ def _build_histogram(
 
 
 def _load_window_data(entry: MetadataEntry, have_energy: bool, config: Wham1DConfig) -> WindowLoadResult:
-    histogram, num_points = Wham1D.read_data(entry.filename, have_energy, config)
+    histogram, num_points, dropped_samples, raw_samples = Wham1D.read_data(entry.filename, have_energy, config)
     if num_points < 0:
         raise OSError(f"Error trying to read {entry.filename}")
 
@@ -651,6 +674,8 @@ def _load_window_data(entry: MetadataEntry, have_energy: bool, config: Wham1DCon
         min_nonzero=trimmed.first,
         max_nonzero=trimmed.last,
         warnings=warnings,
+        raw_samples=raw_samples,
+        dropped_samples=dropped_samples,
     )
 
 

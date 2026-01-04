@@ -15,6 +15,7 @@ build-backend = "setuptools.build_meta"
 wham = "pywham.wham1d:main"
 "wham-2d" = "pywham.wham2d:main"
 reweight = "pywham.reweight:main"
+bwham = "pywham.bwham:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
